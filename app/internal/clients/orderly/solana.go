@@ -107,7 +107,7 @@ func getPeerAddress() [32]byte {
 	return MAINNET_PEER_ADDRESS
 }
 
-func PackMessageForSolana(signer solana.PublicKey, messageBytes []byte) (*solana.Transaction, error) {
+func PackMessageForSolana(signer solana.PublicKey, messageBytes []byte, blockhash solana.Hash) (*solana.Transaction, error) {
 	builder := solana.NewTransactionBuilder()
 	builder.AddInstruction(&solana.GenericInstruction{
 		ProgID:    solana.ComputeBudget,
@@ -122,7 +122,7 @@ func PackMessageForSolana(signer solana.PublicKey, messageBytes []byte) (*solana
 		DataBytes: messageBytes,
 	})
 	builder.SetFeePayer(signer)
-	builder.SetRecentBlockHash(solana.Hash{})
+	builder.SetRecentBlockHash(blockhash)
 	return builder.Build()
 }
 

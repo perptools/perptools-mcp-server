@@ -272,6 +272,9 @@ func (s *Service) PrepareOrderlyWithdraw(ctx context.Context, walletAddress, tok
 	if s.orderlyPrivate == nil {
 		return nil, fmt.Errorf("orderly key not set — call prepare_orderly_key, then complete_orderly_key first")
 	}
+	if s.solanaRPC == nil {
+		return nil, fmt.Errorf("solana RPC not configured — set SOLANA_RPC_URL")
+	}
 	userKey, err := solana.PublicKeyFromBase58(walletAddress)
 	if err != nil {
 		return nil, fmt.Errorf("invalid wallet address: %w", err)
@@ -299,7 +302,12 @@ func (s *Service) PrepareOrderlyWithdraw(ctx context.Context, walletAddress, tok
 		return nil, fmt.Errorf("create withdraw message: %w", err)
 	}
 
-	tx, err := orderly.PackMessageForSolana(userKey, signMessage)
+	recent, err := s.solanaRPC.GetLatestBlockhash(ctx, rpc.CommitmentFinalized)
+	if err != nil {
+		return nil, fmt.Errorf("get blockhash: %w", err)
+	}
+
+	tx, err := orderly.PackMessageForSolana(userKey, signMessage, recent.Value.Blockhash)
 	if err != nil {
 		return nil, fmt.Errorf("pack message for solana: %w", err)
 	}
