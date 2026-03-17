@@ -203,6 +203,9 @@ func createOrder(svc *service.Service) server.ToolHandlerFunc {
 
 		result, err := svc.CreateOrder(ctx, orderReq)
 		if err != nil {
+			if isAuthRequiredError(err.Error()) {
+				return mcp.NewToolResultError(formatAuthError("create order", err)), nil
+			}
 			return mcp.NewToolResultError(formatOrderError(err, orderReq)), nil
 		}
 
@@ -265,7 +268,7 @@ func cancelOrder(svc *service.Service) server.ToolHandlerFunc {
 
 		result, err := svc.CancelOrder(ctx, symbol, orderID)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("cancel order failed: %v", err)), nil
+			return mcp.NewToolResultError(formatAuthError("cancel order", err)), nil
 		}
 
 		out, _ := json.Marshal(result)
@@ -277,7 +280,7 @@ func getPositions(svc *service.Service) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		result, err := svc.GetPositions(ctx)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("get positions failed: %v", err)), nil
+			return mcp.NewToolResultError(formatAuthError("get positions", err)), nil
 		}
 
 		out, _ := json.MarshalIndent(result, "", "  ")
@@ -299,7 +302,7 @@ func setPositionTPSL(svc *service.Service) server.ToolHandlerFunc {
 
 		result, err := svc.SetPositionTPSL(ctx, symbol, tpPrice, slPrice)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("set position TP/SL failed: %v", err)), nil
+			return mcp.NewToolResultError(formatAuthError("set position TP/SL", err)), nil
 		}
 
 		out, _ := json.Marshal(map[string]any{
@@ -319,7 +322,7 @@ func getAlgoOrders(svc *service.Service) server.ToolHandlerFunc {
 
 		result, err := svc.GetAlgoOrders(ctx, symbol)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("get algo orders failed: %v", err)), nil
+			return mcp.NewToolResultError(formatAuthError("get algo orders", err)), nil
 		}
 
 		out, _ := json.MarshalIndent(result, "", "  ")
@@ -339,7 +342,7 @@ func cancelAlgoOrder(svc *service.Service) server.ToolHandlerFunc {
 		}
 
 		if err := svc.CancelAlgoOrder(ctx, symbol, algoOrderID); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("cancel algo order failed: %v", err)), nil
+			return mcp.NewToolResultError(formatAuthError("cancel algo order", err)), nil
 		}
 
 		return mcp.NewToolResultText("Algo order cancelled successfully."), nil
@@ -350,7 +353,7 @@ func getWithdrawNonce(svc *service.Service) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		resp, err := svc.GetSettleNonce(ctx)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("get withdraw nonce failed: %v", err)), nil
+			return mcp.NewToolResultError(formatAuthError("get withdraw nonce", err)), nil
 		}
 		out, _ := json.Marshal(map[string]any{
 			"withdraw_nonce": resp.Data.SettleNonce,
@@ -376,7 +379,7 @@ func prepareOrderlyWithdraw(svc *service.Service) server.ToolHandlerFunc {
 
 		result, err := svc.PrepareOrderlyWithdraw(ctx, wallet, token, amount)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("prepare withdraw failed: %v", err)), nil
+			return mcp.NewToolResultError(formatAuthError("prepare withdraw", err)), nil
 		}
 
 		out, _ := json.Marshal(result)

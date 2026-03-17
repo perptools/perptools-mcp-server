@@ -90,7 +90,7 @@ func getUserPoints(svc *service.Service) server.ToolHandlerFunc {
 		}
 		resp, err := svc.GetUserPoints(ctx, pk)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("get user points failed: %v", err)), nil
+			return mcp.NewToolResultError(formatAuthError("get user points", err)), nil
 		}
 		return jsonResult(resp)
 	}
@@ -107,7 +107,7 @@ func getLeaderboard(svc *service.Service) server.ToolHandlerFunc {
 
 		resp, err := svc.GetLeaderboard(ctx, pk, limit, offset)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("get leaderboard failed: %v", err)), nil
+			return mcp.NewToolResultError(formatAuthError("get leaderboard", err)), nil
 		}
 		return jsonResult(resp)
 	}

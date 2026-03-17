@@ -27,12 +27,15 @@ func main() {
 		server.WithToolCapabilities(true),
 		server.WithInstructions(`You are connected to the Perptools/Orderly MCP server for Solana perpetual futures trading.
 
+PREREQUISITE — Solana wallet access:
+This server requires the ability to sign messages and transactions with a Solana wallet. You MUST have access to either a wallet provider (e.g. connected wallet MCP, wallet extension) or the user's private key. Before starting any auth or trading flow, CHECK if you have a way to sign with the user's Solana wallet. If not, ask the user to provide a connected wallet or configure wallet access for you.
+
 AUTHENTICATION (required before trading AND withdraw):
-1. Get the user's Solana wallet address (via Phantom MCP or ask the user).
+1. Get the user's Solana wallet address (ask the user if needed).
 2. Call prepare_registration with wallet_address → if already_registered=true, skip to step 4.
-3. Sign the returned message_base64 with the wallet (Phantom MCP sign_message) → call complete_registration with the signature.
+3. Sign the returned message_base64 with the user's Solana wallet → call complete_registration with the signature.
 4. Call prepare_orderly_key with wallet_address.
-5. Sign the returned message_base64 with the wallet → call complete_orderly_key with the signature.
+5. Sign the returned message_base64 with the user's Solana wallet → call complete_orderly_key with the signature.
 6. Authentication is complete. All trading tools and prepare_orderly_withdraw are now available.
 
 TRADING TOOLS (require authentication):
@@ -48,7 +51,7 @@ MARKET DATA (no auth needed):
 - health            — check API status.
 
 DEPOSIT/WITHDRAW:
-- prepare_orderly_deposit  — build deposit transaction (no auth). Sign with Phantom MCP, then submit.
+- prepare_orderly_deposit  — build deposit transaction (no auth). Sign with user's Solana wallet, then submit.
 - prepare_orderly_withdraw — build withdrawal transaction. REQUIRES AUTH — perform steps 1–6 first. If user wants to withdraw, start with authentication.
 
 WORKFLOW EXAMPLE — Open a LONG ETH position:

@@ -15,7 +15,7 @@ func RegisterAuthTools(svc *service.Service) []ToolDef {
 	return []ToolDef{
 		{
 			Tool: mcp.NewTool("prepare_registration",
-				mcp.WithDescription("Prepare Orderly account registration. Returns base64-encoded message that must be signed by the wallet (via Phantom MCP), the wallet address, and a debug hash."),
+				mcp.WithDescription("Prepare Orderly account registration. Returns base64-encoded message that must be signed by the user's Solana wallet, the wallet address, and a debug hash."),
 				mcp.WithString("wallet_address", mcp.Required(), mcp.Description("Solana wallet public key (base58)")),
 			),
 			Handler: prepareRegistration(svc),
@@ -24,13 +24,13 @@ func RegisterAuthTools(svc *service.Service) []ToolDef {
 			Tool: mcp.NewTool("complete_registration",
 				mcp.WithDescription("Complete Orderly account registration by submitting the wallet signature."),
 				mcp.WithString("wallet_address", mcp.Required(), mcp.Description("Solana wallet public key (base58)")),
-				mcp.WithString("signature", mcp.Required(), mcp.Description("Wallet signature from Phantom (hex with 0x prefix)")),
+				mcp.WithString("signature", mcp.Required(), mcp.Description("Wallet signature from user's Solana wallet (hex with 0x prefix)")),
 			),
 			Handler: completeRegistration(svc),
 		},
 		{
 			Tool: mcp.NewTool("prepare_orderly_key",
-				mcp.WithDescription("Generate a random ed25519 Orderly key and prepare the registration message. Returns base64-encoded message that must be signed by the wallet (via Phantom MCP), the wallet address, and a debug hash."),
+				mcp.WithDescription("Generate a random ed25519 Orderly key and prepare the registration message. Returns base64-encoded message that must be signed by the user's Solana wallet, the wallet address, and a debug hash."),
 				mcp.WithString("wallet_address", mcp.Required(), mcp.Description("Solana wallet public key (base58)")),
 			),
 			Handler: prepareOrderlyKey(svc),
@@ -39,7 +39,7 @@ func RegisterAuthTools(svc *service.Service) []ToolDef {
 			Tool: mcp.NewTool("complete_orderly_key",
 				mcp.WithDescription("Complete Orderly key registration by submitting the wallet signature. Stores credentials in memory for subsequent API calls."),
 				mcp.WithString("wallet_address", mcp.Required(), mcp.Description("Solana wallet public key (base58)")),
-				mcp.WithString("signature", mcp.Required(), mcp.Description("Wallet signature from Phantom (hex with 0x prefix)")),
+				mcp.WithString("signature", mcp.Required(), mcp.Description("Wallet signature from user's Solana wallet (hex with 0x prefix)")),
 			),
 			Handler: completeOrderlyKey(svc),
 		},
@@ -72,7 +72,7 @@ func prepareRegistration(svc *service.Service) server.ToolHandlerFunc {
 			"message_base64": result.MessageBase64,
 			"wallet_address": result.WalletAddress,
 			"debug_hash":     result.DebugHash,
-			"next_step":      "Sign the message_base64 with the wallet (via Phantom MCP) and call complete_registration with the signature.",
+			"next_step":      "Sign the message_base64 with the user's Solana wallet and call complete_registration with the signature.",
 		})
 		return mcp.NewToolResultText(string(out)), nil
 	}

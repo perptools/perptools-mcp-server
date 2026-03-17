@@ -83,7 +83,7 @@ func setupAndAuth(t *testing.T) *testEnv {
 		t.Logf("  account already registered (account_id: %s)", regData["account_id"])
 	} else {
 		msgBase64, _ := regData["message_base64"].(string)
-		sig := phantomSignMessage(t, privKeyBytes, msgBase64)
+		sig := signMessageWithKey(t, privKeyBytes, msgBase64)
 
 		t.Log("auth — complete_registration")
 		callTool(t, ctx, toolMap, "complete_registration", map[string]any{
@@ -102,7 +102,7 @@ func setupAndAuth(t *testing.T) *testEnv {
 	var keyData map[string]string
 	mustUnmarshal(t, keyResp, &keyData)
 
-	keySig := phantomSignMessage(t, privKeyBytes, keyData["message_base64"])
+	keySig := signMessageWithKey(t, privKeyBytes, keyData["message_base64"])
 
 	t.Log("auth — complete_orderly_key")
 	callTool(t, ctx, toolMap, "complete_orderly_key", map[string]any{
@@ -131,7 +131,7 @@ func TestAuthAndDeposit(t *testing.T) {
 
 	var depositData map[string]any
 	mustUnmarshal(t, depositResp, &depositData)
-	t.Logf("  transaction ready for Phantom sign_transaction (len=%d bytes)",
+	t.Logf("  transaction ready for user's Solana wallet to sign (len=%d bytes)",
 		len(depositData["transaction_base64"].(string)))
 }
 
@@ -171,7 +171,7 @@ func TestWithdraw(t *testing.T) {
 
 	var withdrawData map[string]any
 	mustUnmarshal(t, withdrawResp, &withdrawData)
-	t.Logf("  transaction ready for Phantom sign_transaction (len=%d bytes)",
+	t.Logf("  transaction ready for user's Solana wallet to sign (len=%d bytes)",
 		len(withdrawData["transaction_base64"].(string)))
 }
 
@@ -247,7 +247,7 @@ func extractText(r *mcp.CallToolResult) string {
 	return sb.String()
 }
 
-func phantomSignMessage(t *testing.T, privKey []byte, msgBase64 string) string {
+func signMessageWithKey(t *testing.T, privKey []byte, msgBase64 string) string {
 	t.Helper()
 	msgBytes, err := base64.StdEncoding.DecodeString(msgBase64)
 	if err != nil {
