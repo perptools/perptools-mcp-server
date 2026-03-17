@@ -32,7 +32,7 @@ func RegisterOrderlyTools(svc *service.Service) []ToolDef {
 		},
 		{
 			Tool: mcp.NewTool("prepare_orderly_withdraw",
-				mcp.WithDescription("Build an unsigned Solana memo transaction for withdrawal. Fetches withdraw nonce automatically. Returns base64-encoded transaction for wallet signing."),
+				mcp.WithDescription("Build an unsigned Solana memo transaction for withdrawal. REQUIRES AUTH — user must complete prepare_orderly_key + complete_orderly_key first. Fetches withdraw nonce automatically. Returns base64-encoded transaction for wallet signing."),
 				mcp.WithString("wallet_address", mcp.Required(), mcp.Description("Solana wallet public key (base58)")),
 				mcp.WithString("token", mcp.Required(), mcp.Description("Token symbol: USDC, USDT, or SOL")),
 				mcp.WithNumber("amount", mcp.Required(), mcp.Description("Amount in smallest token units (e.g. 1500000 for 1.5 USDC)")),

@@ -27,13 +27,13 @@ func main() {
 		server.WithToolCapabilities(true),
 		server.WithInstructions(`You are connected to the Perptools/Orderly MCP server for Solana perpetual futures trading.
 
-AUTHENTICATION (required before trading):
+AUTHENTICATION (required before trading AND withdraw):
 1. Get the user's Solana wallet address (via Phantom MCP or ask the user).
 2. Call prepare_registration with wallet_address → if already_registered=true, skip to step 4.
 3. Sign the returned message_base64 with the wallet (Phantom MCP sign_message) → call complete_registration with the signature.
 4. Call prepare_orderly_key with wallet_address.
 5. Sign the returned message_base64 with the wallet → call complete_orderly_key with the signature.
-6. Authentication is complete. All trading tools are now available.
+6. Authentication is complete. All trading tools and prepare_orderly_withdraw are now available.
 
 TRADING TOOLS (require authentication):
 - create_order        — place MARKET/LIMIT orders on PERP markets. Use order_quantity in base currency (ETH, BTC), NOT USDC.
@@ -48,8 +48,8 @@ MARKET DATA (no auth needed):
 - health            — check API status.
 
 DEPOSIT/WITHDRAW:
-- prepare_orderly_deposit  — build deposit transaction (sign with Phantom MCP, then submit).
-- prepare_orderly_withdraw — build withdrawal transaction.
+- prepare_orderly_deposit  — build deposit transaction (no auth). Sign with Phantom MCP, then submit.
+- prepare_orderly_withdraw — build withdrawal transaction. REQUIRES AUTH — perform steps 1–6 first. If user wants to withdraw, start with authentication.
 
 WORKFLOW EXAMPLE — Open a LONG ETH position:
 1. Authenticate (steps 1-6 above).

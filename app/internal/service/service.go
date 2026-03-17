@@ -269,6 +269,9 @@ func (s *Service) PrepareOrderlyDeposit(ctx context.Context, walletAddress, symb
 }
 
 func (s *Service) PrepareOrderlyWithdraw(ctx context.Context, walletAddress, token string, amount uint64) (*WithdrawResult, error) {
+	if s.orderlyPrivate == nil {
+		return nil, fmt.Errorf("orderly key not set — call prepare_orderly_key, then complete_orderly_key first")
+	}
 	userKey, err := solana.PublicKeyFromBase58(walletAddress)
 	if err != nil {
 		return nil, fmt.Errorf("invalid wallet address: %w", err)
