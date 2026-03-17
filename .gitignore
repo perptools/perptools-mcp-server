@@ -1,1 +1,34 @@
+# Env
 .env
+
+# Build / binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+dist/
+build/
+
+# Test / coverage
+*.test
+*.out
+coverage.html
+__debug_bin*
+
+# IDE / editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Temp / logs
+*.tmp
+*.temp
+*.log
