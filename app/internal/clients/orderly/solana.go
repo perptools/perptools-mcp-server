@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 
 	"github.com/gagliardetto/solana-go"
+	computebudget "github.com/gagliardetto/solana-go/programs/compute-budget"
 )
 
 const ChainName = "mainnet"
@@ -109,14 +110,7 @@ func getPeerAddress() [32]byte {
 
 func PackMessageForSolana(signer solana.PublicKey, messageBytes []byte, blockhash solana.Hash) (*solana.Transaction, error) {
 	builder := solana.NewTransactionBuilder()
-	builder.AddInstruction(&solana.GenericInstruction{
-		ProgID:    solana.ComputeBudget,
-		DataBytes: []byte{3, 0, 0, 0, 0, 0, 0, 0, 0},
-	})
-	builder.AddInstruction(&solana.GenericInstruction{
-		ProgID:    solana.ComputeBudget,
-		DataBytes: []byte{2, 0, 0, 0, 0},
-	})
+	builder.AddInstruction(computebudget.NewSetComputeUnitLimitInstruction(400_000).Build())
 	builder.AddInstruction(&solana.GenericInstruction{
 		ProgID:    solana.MemoProgramID,
 		DataBytes: messageBytes,
