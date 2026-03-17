@@ -1,0 +1,13 @@
+services:
+  mcp-server:
+    build: .
+    env_file: .env
+    ports:
+      - "${MCP_PORT:-8080}:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/mcp/sse"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
