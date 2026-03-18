@@ -293,7 +293,7 @@ func (s *Service) PrepareOrderlyWithdraw(ctx context.Context, walletAddress, tok
 		Token:         token,
 		Amount:        amount,
 		WithdrawNonce: withdrawNonce,
-		Timestamp:     uint64(time.Now().UTC().UnixMilli()),
+		Timestamp:     uint64(time.Now().UTC().Unix()),
 		ChainType:     "SOL",
 	}
 

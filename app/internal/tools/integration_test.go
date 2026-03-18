@@ -15,6 +15,9 @@ import (
 	"mcp-server/app/internal/service"
 	"mcp-server/app/internal/tools"
 
+	bin "github.com/gagliardetto/binary"
+	"github.com/gagliardetto/solana-go"
+	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -31,6 +34,8 @@ type testEnv struct {
 	toolMap       map[string]func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error)
 	walletAddress string
 	privKey       []byte
+	privKeyBase58 string
+	rpcClient     *rpc.Client
 }
 
 // setupAndAuth creates the service, registers all tools, and runs the full
@@ -65,8 +70,16 @@ func setupAndAuth(t *testing.T) *testEnv {
 		toolMap[td.Tool.Name] = td.Handler
 	}
 
+	rpcURL := envOr("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
 	ctx := context.Background()
-	env := &testEnv{ctx: ctx, toolMap: toolMap, walletAddress: walletAddress, privKey: privKeyBytes}
+	env := &testEnv{
+		ctx:           ctx,
+		toolMap:       toolMap,
+		walletAddress: walletAddress,
+		privKey:        privKeyBytes,
+		privKeyBase58:  privKeyBase58,
+		rpcClient:     rpc.New(rpcURL),
+	}
 
 	// --- registration ---
 	t.Logf("wallet: %s", walletAddress)
@@ -156,7 +169,7 @@ func TestGetWithdrawNonce(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// TestWithdraw — auth + prepare 1.5 USDC withdraw
+// TestWithdraw — auth + prepare 1.5 USDC withdraw, sign and send
 // ---------------------------------------------------------------------------
 
 func TestWithdraw(t *testing.T) {
@@ -171,8 +184,41 @@ func TestWithdraw(t *testing.T) {
 
 	var withdrawData map[string]any
 	mustUnmarshal(t, withdrawResp, &withdrawData)
-	t.Logf("  transaction ready for user's Solana wallet to sign (len=%d bytes)",
-		len(withdrawData["transaction_base64"].(string)))
+	txBase64, _ := withdrawData["transaction_base64"].(string)
+	t.Logf("  transaction prepared (len=%d bytes)", len(txBase64))
+
+	// Decode and parse transaction
+	txBytes, err := base64.StdEncoding.DecodeString(txBase64)
+	if err != nil {
+		t.Fatalf("decode tx base64: %v", err)
+	}
+	tx, err := solana.TransactionFromDecoder(bin.NewBinDecoder(txBytes))
+	if err != nil {
+		t.Fatalf("parse transaction: %v", err)
+	}
+
+	// Sign with private key from .env
+	privKey, err := solana.PrivateKeyFromBase58(env.privKeyBase58)
+	if err != nil {
+		t.Fatalf("invalid private key: %v", err)
+	}
+	_, err = tx.Sign(func(key solana.PublicKey) *solana.PrivateKey {
+		if privKey.PublicKey().Equals(key) {
+			return &privKey
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("sign transaction: %v", err)
+	}
+	t.Log("  transaction signed")
+
+	// Send to Solana
+	sig, err := env.rpcClient.SendTransaction(env.ctx, tx)
+	if err != nil {
+		t.Fatalf("send transaction: %v", err)
+	}
+	t.Logf("  transaction sent: %s", sig.String())
 }
 
 // ---------------------------------------------------------------------------

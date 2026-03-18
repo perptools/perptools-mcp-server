@@ -108,8 +108,13 @@ func getPeerAddress() [32]byte {
 	return MAINNET_PEER_ADDRESS
 }
 
+// PackMessageForSolana builds a Solana tx with ComputeBudget + Memo for Orderly withdraw.
+// Aligns with jupbot-perps-api: SetComputeUnitPrice(0), SetComputeUnitLimit(400_000), Memo.
+// blockhash must be provided for user-signed transactions; empty hash is valid for server-signed (set at broadcast).
 func PackMessageForSolana(signer solana.PublicKey, messageBytes []byte, blockhash solana.Hash) (*solana.Transaction, error) {
 	builder := solana.NewTransactionBuilder()
+	// Match jupbot-perps-api order: SetComputeUnitPrice first, then SetComputeUnitLimit, then Memo
+	builder.AddInstruction(computebudget.NewSetComputeUnitPriceInstruction(0).Build())
 	builder.AddInstruction(computebudget.NewSetComputeUnitLimitInstruction(400_000).Build())
 	builder.AddInstruction(&solana.GenericInstruction{
 		ProgID:    solana.MemoProgramID,
