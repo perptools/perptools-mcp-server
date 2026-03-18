@@ -130,7 +130,8 @@ type PrivateClient interface {
 	CreateOrder(ctx context.Context, req CreateOrderRequest) (*CreateOrderResponse, error)
 	CancelOrder(ctx context.Context, symbol string, orderID int) (*CancelOrderResponse, error)
 	GetPositions(ctx context.Context) (*PositionsResponse, error)
-	GetSettleNonce(ctx context.Context) (*SettleNonceResponse, error)
+	GetWithdrawNonce(ctx context.Context) (*WithdrawNonceResponse, error)
+	CreateWithdrawRequest(ctx context.Context, req CreateWithdrawRequest) (*CreateWithdrawResponse, error)
 	PlaceAlgoOrder(ctx context.Context, req PlaceAlgoOrderRequest) (*PlaceAlgoOrderResponse, error)
 	CancelAlgoOrder(ctx context.Context, symbol string, algoOrderID int) error
 	GetAlgoOrders(ctx context.Context, symbol string) (*GetAlgoOrdersResponse, error)
@@ -249,11 +250,11 @@ func (c *privateClient) GetPositions(ctx context.Context) (*PositionsResponse, e
 	return &out, nil
 }
 
-func (c *privateClient) GetSettleNonce(ctx context.Context) (*SettleNonceResponse, error) {
-	var out SettleNonceResponse
+func (c *privateClient) GetWithdrawNonce(ctx context.Context) (*WithdrawNonceResponse, error) {
+	var out WithdrawNonceResponse
 	r, err := c.http.R().SetContext(ctx).
 		SetResult(&out).
-		Get("/v1/settle_nonce")
+		Get("/v1/withdraw_nonce")
 	if err != nil {
 		return nil, fmt.Errorf("get settle nonce: %w", err)
 	}
@@ -262,6 +263,21 @@ func (c *privateClient) GetSettleNonce(ctx context.Context) (*SettleNonceRespons
 	}
 	if !out.Success {
 		return nil, fmt.Errorf("get settle nonce: %s", out.Message)
+	}
+	return &out, nil
+}
+
+func (c *privateClient) CreateWithdrawRequest(ctx context.Context, req CreateWithdrawRequest) (*CreateWithdrawResponse, error) {
+	var out CreateWithdrawResponse
+	r, err := c.http.R().SetContext(ctx).
+		SetBody(req).
+		SetResult(&out).
+		Post("/v1/withdraw_request")
+	if err != nil {
+		return nil, fmt.Errorf("create withdraw request: %w", err)
+	}
+	if r.IsError() || !out.Success {
+		return nil, parseAPIError(r.Body(), "create withdraw request")
 	}
 	return &out, nil
 }

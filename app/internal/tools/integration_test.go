@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -76,8 +77,8 @@ func setupAndAuth(t *testing.T) *testEnv {
 		ctx:           ctx,
 		toolMap:       toolMap,
 		walletAddress: walletAddress,
-		privKey:        privKeyBytes,
-		privKeyBase58:  privKeyBase58,
+		privKey:       privKeyBytes,
+		privKeyBase58: privKeyBase58,
 		rpcClient:     rpc.New(rpcURL),
 	}
 
@@ -128,14 +129,13 @@ func setupAndAuth(t *testing.T) *testEnv {
 }
 
 // ---------------------------------------------------------------------------
-// TestAuthAndDeposit — full auth + deposit tx preparation
+// TestAuthAndDeposit — full auth + deposit tx preparation, sign and send
 // ---------------------------------------------------------------------------
 
 func TestAuthAndDeposit(t *testing.T) {
 	env := setupAndAuth(t)
 
 	t.Log("deposit — prepare_orderly_deposit (1 USDC)")
-
 	depositResp := callTool(t, env.ctx, env.toolMap, "prepare_orderly_deposit", map[string]any{
 		"wallet_address": env.walletAddress,
 		"symbol":         "USDC",
@@ -144,47 +144,7 @@ func TestAuthAndDeposit(t *testing.T) {
 
 	var depositData map[string]any
 	mustUnmarshal(t, depositResp, &depositData)
-	t.Logf("  transaction ready for user's Solana wallet to sign (len=%d bytes)",
-		len(depositData["transaction_base64"].(string)))
-}
-
-// ---------------------------------------------------------------------------
-// TestGetWithdrawNonce — auth + get settle nonce only (isolates Orderly API)
-// ---------------------------------------------------------------------------
-
-func TestGetWithdrawNonce(t *testing.T) {
-	env := setupAndAuth(t)
-
-	t.Log("get_withdraw_nonce — testing Orderly /v1/settle_nonce")
-	start := time.Now()
-	nonceResp := callTool(t, env.ctx, env.toolMap, "get_withdraw_nonce", nil)
-	elapsed := time.Since(start)
-
-	var nonceData map[string]any
-	mustUnmarshal(t, nonceResp, &nonceData)
-	t.Logf("  withdraw_nonce=%v (took %v)", nonceData["withdraw_nonce"], elapsed)
-	if elapsed > 5*time.Second {
-		t.Logf("  WARNING: settle_nonce took >5s — Orderly API may be slow from this host")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// TestWithdraw — auth + prepare 1.5 USDC withdraw, sign and send
-// ---------------------------------------------------------------------------
-
-func TestWithdraw(t *testing.T) {
-	env := setupAndAuth(t)
-
-	t.Log("withdraw — prepare_orderly_withdraw (1.5 USDC)")
-	withdrawResp := callTool(t, env.ctx, env.toolMap, "prepare_orderly_withdraw", map[string]any{
-		"wallet_address": env.walletAddress,
-		"token":          "USDC",
-		"amount":         float64(1_500_000),
-	})
-
-	var withdrawData map[string]any
-	mustUnmarshal(t, withdrawResp, &withdrawData)
-	txBase64, _ := withdrawData["transaction_base64"].(string)
+	txBase64, _ := depositData["transaction_base64"].(string)
 	t.Logf("  transaction prepared (len=%d bytes)", len(txBase64))
 
 	// Decode and parse transaction
@@ -213,12 +173,154 @@ func TestWithdraw(t *testing.T) {
 	}
 	t.Log("  transaction signed")
 
-	// Send to Solana
+	// Send to Solana (skip send if wallet has insufficient USDC)
 	sig, err := env.rpcClient.SendTransaction(env.ctx, tx)
 	if err != nil {
+		if strings.Contains(err.Error(), "insufficient funds") {
+			t.Logf("  send skipped: wallet has insufficient USDC (prepare+sign OK)")
+			return
+		}
 		t.Fatalf("send transaction: %v", err)
 	}
 	t.Logf("  transaction sent: %s", sig.String())
+}
+
+// ---------------------------------------------------------------------------
+// TestWithdraw — auth + prepare 1.5 USDC withdraw, sign tx, submit to Orderly API
+// ---------------------------------------------------------------------------
+
+func TestWithdraw(t *testing.T) {
+	env := setupAndAuth(t)
+	privKey, err := solana.PrivateKeyFromBase58(env.privKeyBase58)
+	if err != nil {
+		t.Fatalf("invalid private key: %v", err)
+	}
+
+	const maxRetries = 3 // nonce is single-use; retry if stale from parallel/prior run
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			time.Sleep(2 * time.Second) // allow Orderly to update nonce after prior attempt
+			t.Logf("  retry %d — fresh prepare (new nonce)", attempt+1)
+		}
+
+		t.Log("withdraw — prepare_orderly_withdraw (1.5 USDC)")
+		withdrawResp := callTool(t, env.ctx, env.toolMap, "prepare_orderly_withdraw", map[string]any{
+			"wallet_address": env.walletAddress,
+			"token":          "USDC",
+			"amount":         float64(1_500_000),
+		})
+
+		var withdrawData map[string]any
+		mustUnmarshal(t, withdrawResp, &withdrawData)
+
+		txBase64, _ := withdrawData["transaction_base64"].(string)
+		msgObj, _ := withdrawData["message"].(map[string]any)
+		if txBase64 == "" || msgObj == nil {
+			t.Fatalf("prepare response missing transaction_base64 or message")
+		}
+		t.Logf("  [debug] withdrawNonce=%v", msgObj["withdrawNonce"])
+
+		txBytes, err := base64.StdEncoding.DecodeString(txBase64)
+		if err != nil {
+			t.Fatalf("decode tx base64: %v", err)
+		}
+
+		tx, err := solana.TransactionFromDecoder(bin.NewBinDecoder(txBytes))
+		if err != nil {
+			t.Fatalf("parse transaction: %v", err)
+		}
+
+		_, err = tx.Sign(func(key solana.PublicKey) *solana.PrivateKey {
+			if privKey.PublicKey().Equals(key) {
+				return &privKey
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("sign transaction: %v", err)
+		}
+		if len(tx.Signatures) == 0 {
+			t.Fatalf("no signatures after sign")
+		}
+		sigHex := "0x" + hex.EncodeToString(tx.Signatures[0][:])
+
+		// Ensure types: chainId as number, withdrawNonce/timestamp/amount as string (per Orderly API)
+		chainID, _ := toNumber(msgObj["chainId"])
+		submitArgs := map[string]any{
+			"signature":      sigHex,
+			"broker_id":      toString(msgObj["brokerId"]),
+			"chain_id":       chainID,
+			"receiver":       toString(msgObj["receiver"]),
+			"token":          toString(msgObj["token"]),
+			"amount":         toString(msgObj["amount"]),
+			"withdraw_nonce": toString(msgObj["withdrawNonce"]),
+			"timestamp":      toString(msgObj["timestamp"]),
+			"chain_type":     "SOL",
+		}
+
+		submitResp, submitErr := callToolOrError(t, env.ctx, env.toolMap, "submit_orderly_withdraw", submitArgs)
+		t.Logf("  submit response: %s", submitResp)
+		if submitErr == nil {
+			return // success
+		}
+		if !strings.Contains(submitResp, "Nonce error") {
+			t.Fatalf("submit_orderly_withdraw failed: %s", submitResp)
+		}
+	}
+	t.Fatalf("submit_orderly_withdraw failed with Nonce error after %d attempts (nonce may be consumed by parallel run)", maxRetries)
+}
+
+func callToolOrError(t *testing.T, ctx context.Context, toolMap map[string]func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error), name string, args map[string]any) (string, error) {
+	t.Helper()
+	handler, ok := toolMap[name]
+	if !ok {
+		return "", fmt.Errorf("tool %q not registered", name)
+	}
+	req := mcp.CallToolRequest{}
+	req.Params.Name = name
+	req.Params.Arguments = args
+	result, err := handler(ctx, req)
+	if err != nil {
+		return "", err
+	}
+	text := extractText(result)
+	if result.IsError {
+		return text, fmt.Errorf("%s", text)
+	}
+	return text, nil
+}
+
+func keysOf(m map[string]any) []string {
+	var k []string
+	for key := range m {
+		k = append(k, key)
+	}
+	return k
+}
+
+func toString(v any) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return fmt.Sprint(v)
+}
+
+func toNumber(v any) (float64, bool) {
+	if v == nil {
+		return 0, false
+	}
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	}
+	return 0, false
 }
 
 // ---------------------------------------------------------------------------

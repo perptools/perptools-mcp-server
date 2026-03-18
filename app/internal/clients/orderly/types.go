@@ -118,9 +118,9 @@ type GetAccountResponse struct {
 // ---------------------------------------------------------------------------
 
 type CreateOrderRequest struct {
-	Symbol          string  `json:"symbol"`
-	ClientOrderID   string  `json:"client_order_id,omitempty"`
-	OrderType       string  `json:"order_type"`
+	Symbol        string  `json:"symbol"`
+	ClientOrderID string  `json:"client_order_id,omitempty"`
+	OrderType     string  `json:"order_type"`
 	OrderPrice    float64 `json:"order_price,omitempty"`
 	OrderQuantity float64 `json:"order_quantity,omitempty"`
 	Side          string  `json:"side"`
@@ -165,14 +165,14 @@ type PositionsResponse struct {
 	Timestamp int64  `json:"timestamp"`
 	Message   string `json:"message,omitempty"`
 	Data      struct {
-		MarginRatio         float64    `json:"current_margin_ratio_with_orders"`
-		FreeCollateral      float64    `json:"free_collateral"`
-		TotalCollateralVal  float64    `json:"total_collateral_value"`
-		TotalPnl24H         float64    `json:"total_pnl_24_h"`
-		MaintenanceMargin   float64    `json:"maintenance_margin_ratio"`
-		InitialMargin       float64    `json:"initial_margin_ratio"`
-		OpenMarginRatio     float64    `json:"open_margin_ratio"`
-		Rows                []Position `json:"rows"`
+		MarginRatio        float64    `json:"current_margin_ratio_with_orders"`
+		FreeCollateral     float64    `json:"free_collateral"`
+		TotalCollateralVal float64    `json:"total_collateral_value"`
+		TotalPnl24H        float64    `json:"total_pnl_24_h"`
+		MaintenanceMargin  float64    `json:"maintenance_margin_ratio"`
+		InitialMargin      float64    `json:"initial_margin_ratio"`
+		OpenMarginRatio    float64    `json:"open_margin_ratio"`
+		Rows               []Position `json:"rows"`
 	} `json:"data"`
 }
 
@@ -197,20 +197,20 @@ type Position struct {
 // PlaceAlgoOrderRequest is the body for POSITIONAL_TP_SL (take-profit / stop-loss on position).
 // POSITIONAL_TP_SL: max 1 per user, closes full position when triggered.
 type PlaceAlgoOrderRequest struct {
-	Symbol            string             `json:"symbol"`
-	AlgoType          string             `json:"algo_type"` // "POSITIONAL_TP_SL"
-	TriggerPriceType  string             `json:"trigger_price_type"`
-	ChildOrders       []AlgoChildOrder   `json:"child_orders"`
+	Symbol           string           `json:"symbol"`
+	AlgoType         string           `json:"algo_type"` // "POSITIONAL_TP_SL"
+	TriggerPriceType string           `json:"trigger_price_type"`
+	ChildOrders      []AlgoChildOrder `json:"child_orders"`
 }
 
 type AlgoChildOrder struct {
-	Symbol            string  `json:"symbol"`
-	AlgoType          string  `json:"algo_type"` // "TAKE_PROFIT" or "STOP_LOSS"
-	Side              string  `json:"side"`
-	OrderType         string  `json:"type"` // "CLOSE_POSITION" for POSITIONAL_TP_SL
-	TriggerPriceType  string  `json:"trigger_price_type"`
-	TriggerPrice      float64 `json:"trigger_price"`
-	ReduceOnly        bool    `json:"reduce_only"`
+	Symbol           string  `json:"symbol"`
+	AlgoType         string  `json:"algo_type"` // "TAKE_PROFIT" or "STOP_LOSS"
+	Side             string  `json:"side"`
+	OrderType        string  `json:"type"` // "CLOSE_POSITION" for POSITIONAL_TP_SL
+	TriggerPriceType string  `json:"trigger_price_type"`
+	TriggerPrice     float64 `json:"trigger_price"`
+	ReduceOnly       bool    `json:"reduce_only"`
 }
 
 type PlaceAlgoOrderResponse struct {
@@ -223,16 +223,16 @@ type PlaceAlgoOrderResponse struct {
 }
 
 // ---------------------------------------------------------------------------
-// Get Settle Nonce — GET /v1/settle_nonce (used for withdraw nonce)
-// https://orderly.network/docs/build-on-omnichain/evm-api/restful-api/private/get-settle-pnl-nonce
+// Get Withdraw Nonce — GET /v1/withdraw_nonce (used for withdraw nonce)
+// https://orderly.network/docs/build-on-omnichain/evm-api/restful-api/private/get-withdraw-nonce
 // ---------------------------------------------------------------------------
 
-type SettleNonceResponse struct {
+type WithdrawNonceResponse struct {
 	Success   bool   `json:"success"`
 	Timestamp int64  `json:"timestamp"`
 	Message   string `json:"message,omitempty"`
 	Data      struct {
-		SettleNonce uint64 `json:"settle_nonce"`
+		WithdrawNonce uint64 `json:"withdraw_nonce"`
 	} `json:"data"`
 }
 
@@ -243,7 +243,7 @@ type SettleNonceResponse struct {
 // GetAlgoOrdersResponse — GET /v1/algo/orders
 type GetAlgoOrdersResponse struct {
 	Success   bool   `json:"success"`
-	Timestamp int64 `json:"timestamp"`
+	Timestamp int64  `json:"timestamp"`
 	Message   string `json:"message,omitempty"`
 	Data      struct {
 		Rows []AlgoOrderRow `json:"rows"`
@@ -251,17 +251,17 @@ type GetAlgoOrdersResponse struct {
 }
 
 type AlgoOrderRow struct {
-	AlgoOrderID      int             `json:"algo_order_id"`
-	AlgoType         string          `json:"algo_type"`
-	Symbol           string          `json:"symbol"`
-	Side             string          `json:"side"`
-	Quantity         float64         `json:"quantity"`
-	TriggerPrice     float64         `json:"trigger_price"`
-	TriggerPriceType string          `json:"trigger_price_type"`
-	IsTriggered      bool            `json:"is_triggered"`
-	IsActivated      bool            `json:"is_activated"`
-	AlgoStatus       string          `json:"algo_status"`
-	ChildOrders      []AlgoOrderRow   `json:"child_orders,omitempty"`
+	AlgoOrderID      int            `json:"algo_order_id"`
+	AlgoType         string         `json:"algo_type"`
+	Symbol           string         `json:"symbol"`
+	Side             string         `json:"side"`
+	Quantity         float64        `json:"quantity"`
+	TriggerPrice     float64        `json:"trigger_price"`
+	TriggerPriceType string         `json:"trigger_price_type"`
+	IsTriggered      bool           `json:"is_triggered"`
+	IsActivated      bool           `json:"is_activated"`
+	AlgoStatus       string         `json:"algo_status"`
+	ChildOrders      []AlgoOrderRow `json:"child_orders,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -277,4 +277,38 @@ type WithdrawMessage struct {
 	WithdrawNonce uint64 `json:"withdrawNonce"`
 	Timestamp     uint64 `json:"timestamp"`
 	ChainType     string `json:"chainType"`
+}
+
+// ---------------------------------------------------------------------------
+// Create Withdraw Request — POST /v1/withdraw_request
+// https://orderly.network/docs/build-on-omnichain/restful-api/private/create-withdraw-request
+// ---------------------------------------------------------------------------
+
+const WithdrawVerifyingContract = "0x6F7a338F2aA472838dEFD3283eB360d4Dff5D203"
+
+type CreateWithdrawRequest struct {
+	Signature         string                 `json:"signature"`
+	UserAddress       string                 `json:"userAddress"`
+	VerifyingContract string                 `json:"verifyingContract"`
+	Message           WithdrawRequestMessage `json:"message"`
+}
+
+type WithdrawRequestMessage struct {
+	BrokerID      string `json:"brokerId"`
+	ChainID       int    `json:"chainId"`
+	Receiver      string `json:"receiver"`
+	Token         string `json:"token"`
+	Amount        string `json:"amount"`
+	WithdrawNonce string `json:"withdrawNonce"`
+	Timestamp     string `json:"timestamp"`
+	ChainType     string `json:"chainType"`
+}
+
+type CreateWithdrawResponse struct {
+	Success   bool   `json:"success"`
+	Timestamp int64  `json:"timestamp"`
+	Message   string `json:"message,omitempty"`
+	Data      struct {
+		WithdrawID int `json:"withdraw_id"`
+	} `json:"data"`
 }

@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 
 	"github.com/gagliardetto/solana-go"
-	computebudget "github.com/gagliardetto/solana-go/programs/compute-budget"
 )
 
 const ChainName = "mainnet"
@@ -109,13 +108,18 @@ func getPeerAddress() [32]byte {
 }
 
 // PackMessageForSolana builds a Solana tx with ComputeBudget + Memo for Orderly withdraw.
-// Aligns with jupbot-perps-api: SetComputeUnitPrice(0), SetComputeUnitLimit(400_000), Memo.
-// blockhash must be provided for user-signed transactions; empty hash is valid for server-signed (set at broadcast).
+// Byte-for-byte match with jupbot-perps-api — Orderly verifies against this canonical format.
 func PackMessageForSolana(signer solana.PublicKey, messageBytes []byte, blockhash solana.Hash) (*solana.Transaction, error) {
 	builder := solana.NewTransactionBuilder()
-	// Match jupbot-perps-api order: SetComputeUnitPrice first, then SetComputeUnitLimit, then Memo
-	builder.AddInstruction(computebudget.NewSetComputeUnitPriceInstruction(0).Build())
-	builder.AddInstruction(computebudget.NewSetComputeUnitLimitInstruction(400_000).Build())
+	builder.AddInstruction(&solana.GenericInstruction{
+		ProgID:    solana.ComputeBudget,
+		DataBytes: []byte{3, 0, 0, 0, 0, 0, 0, 0, 0},
+	})
+	// SetComputeUnitLimit(0) — must match jupbot-perps-api for Orderly signature verification
+	builder.AddInstruction(&solana.GenericInstruction{
+		ProgID:    solana.ComputeBudget,
+		DataBytes: []byte{2, 0, 0, 0, 0},
+	})
 	builder.AddInstruction(&solana.GenericInstruction{
 		ProgID:    solana.MemoProgramID,
 		DataBytes: messageBytes,

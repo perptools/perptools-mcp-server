@@ -25,19 +25,28 @@ func RegisterOrderlyTools(svc *service.Service) []ToolDef {
 			Handler: prepareOrderlyDeposit(svc),
 		},
 		{
-			Tool: mcp.NewTool("get_withdraw_nonce",
-				mcp.WithDescription("Get the current withdraw (settle) nonce from Orderly. Requires authentication. Used for debugging or when prepare_orderly_withdraw fetches it automatically."),
-			),
-			Handler: getWithdrawNonce(svc),
-		},
-		{
 			Tool: mcp.NewTool("prepare_orderly_withdraw",
-				mcp.WithDescription("Build an unsigned Solana memo transaction for withdrawal. REQUIRES AUTH — user must complete prepare_orderly_key + complete_orderly_key first. Fetches withdraw nonce automatically. Returns base64-encoded transaction for wallet signing."),
+				mcp.WithDescription("Prepare a withdrawal request per Orderly API. REQUIRES AUTH. Returns message + transaction_base64. User must sign the Solana transaction with their wallet, then call submit_orderly_withdraw with the transaction signature (hex with 0x prefix) and the message from this response."),
 				mcp.WithString("wallet_address", mcp.Required(), mcp.Description("Solana wallet public key (base58)")),
 				mcp.WithString("token", mcp.Required(), mcp.Description("Token symbol: USDC, USDT, or SOL")),
 				mcp.WithNumber("amount", mcp.Required(), mcp.Description("Amount in smallest token units (e.g. 1500000 for 1.5 USDC)")),
 			),
 			Handler: prepareOrderlyWithdraw(svc),
+		},
+		{
+			Tool: mcp.NewTool("submit_orderly_withdraw",
+				mcp.WithDescription("Submit a signed withdraw request to Orderly API. Call after prepare_orderly_withdraw: user signs the transaction_base64 (Solana tx), then pass the first signature as hex with 0x prefix (e.g. 0x1234...abcd) and the message fields from prepare."),
+				mcp.WithString("signature", mcp.Required(), mcp.Description("Hex signature (0x-prefixed) from signing the Solana transaction with user's wallet")),
+				mcp.WithString("broker_id", mcp.Required(), mcp.Description("From prepare response: message.brokerId")),
+				mcp.WithNumber("chain_id", mcp.Required(), mcp.Description("From prepare response: message.chainId (900900900)")),
+				mcp.WithString("receiver", mcp.Required(), mcp.Description("From prepare response: message.receiver (wallet address)")),
+				mcp.WithString("token", mcp.Required(), mcp.Description("From prepare response: message.token")),
+				mcp.WithString("amount", mcp.Required(), mcp.Description("From prepare response: message.amount")),
+				mcp.WithString("withdraw_nonce", mcp.Required(), mcp.Description("From prepare response: message.withdrawNonce")),
+				mcp.WithString("timestamp", mcp.Required(), mcp.Description("From prepare response: message.timestamp")),
+				mcp.WithString("chain_type", mcp.Description("From prepare response: message.chainType (default SOL)")),
+			),
+			Handler: submitOrderlyWithdraw(svc),
 		},
 		{
 			Tool: mcp.NewTool("create_order",
@@ -306,11 +315,11 @@ func setPositionTPSL(svc *service.Service) server.ToolHandlerFunc {
 		}
 
 		out, _ := json.Marshal(map[string]any{
-			"algo_order_id":   result.Data.AlgoOrderID,
-			"symbol":          symbol,
-			"take_profit":     tpPrice,
-			"stop_loss":       slPrice,
-			"message":         "TP/SL order placed. Use get_algo_orders to check status.",
+			"algo_order_id": result.Data.AlgoOrderID,
+			"symbol":        symbol,
+			"take_profit":   tpPrice,
+			"stop_loss":     slPrice,
+			"message":       "TP/SL order placed. Use get_algo_orders to check status.",
 		})
 		return mcp.NewToolResultText(string(out)), nil
 	}
@@ -349,19 +358,6 @@ func cancelAlgoOrder(svc *service.Service) server.ToolHandlerFunc {
 	}
 }
 
-func getWithdrawNonce(svc *service.Service) server.ToolHandlerFunc {
-	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		resp, err := svc.GetSettleNonce(ctx)
-		if err != nil {
-			return mcp.NewToolResultError(formatAuthError("get withdraw nonce", err)), nil
-		}
-		out, _ := json.Marshal(map[string]any{
-			"withdraw_nonce": resp.Data.SettleNonce,
-		})
-		return mcp.NewToolResultText(string(out)), nil
-	}
-}
-
 func prepareOrderlyWithdraw(svc *service.Service) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		wallet, err := req.RequireString("wallet_address")
@@ -383,6 +379,52 @@ func prepareOrderlyWithdraw(svc *service.Service) server.ToolHandlerFunc {
 		}
 
 		out, _ := json.Marshal(result)
+		return mcp.NewToolResultText(string(out)), nil
+	}
+}
+
+func submitOrderlyWithdraw(svc *service.Service) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		sig, err := req.RequireString("signature")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		brokerID, _ := req.RequireString("broker_id")
+		chainID := int(optNumber(req, "chain_id", 0))
+		receiver, _ := req.RequireString("receiver")
+		token, _ := req.RequireString("token")
+		amount, _ := req.RequireString("amount")
+		withdrawNonce, _ := req.RequireString("withdraw_nonce")
+		timestamp, _ := req.RequireString("timestamp")
+		chainType := optString(req, "chain_type")
+		if chainType == "" {
+			chainType = "SOL"
+		}
+
+		if brokerID == "" || receiver == "" || token == "" || amount == "" || withdrawNonce == "" || timestamp == "" {
+			return mcp.NewToolResultError("broker_id, receiver, token, amount, withdraw_nonce, timestamp are required (from prepare_orderly_withdraw message)"), nil
+		}
+
+		msg := orderly.WithdrawRequestMessage{
+			BrokerID:      brokerID,
+			ChainID:       chainID,
+			Receiver:      receiver,
+			Token:         token,
+			Amount:        amount,
+			WithdrawNonce: withdrawNonce,
+			Timestamp:     timestamp,
+			ChainType:     chainType,
+		}
+
+		result, err := svc.SubmitOrderlyWithdraw(ctx, sig, msg)
+		if err != nil {
+			return mcp.NewToolResultError(formatAuthError("submit withdraw", err)), nil
+		}
+
+		out, _ := json.Marshal(map[string]any{
+			"withdraw_id": result.Data.WithdrawID,
+			"message":     "Withdraw request submitted successfully",
+		})
 		return mcp.NewToolResultText(string(out)), nil
 	}
 }

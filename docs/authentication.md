@@ -120,7 +120,6 @@ The server generates a random ed25519 Orderly key. The user signs to prove walle
 | `get_algo_orders` | Yes |
 | `cancel_algo_order` | Yes |
 | `prepare_orderly_withdraw` | Yes |
-| `get_withdraw_nonce` | Yes |
 | `get_user_points` | Yes |
 | `get_leaderboard` | Yes |
 | `prepare_registration` | No |

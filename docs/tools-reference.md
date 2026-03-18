@@ -85,12 +85,6 @@ Build unsigned Solana memo transaction for withdrawal. **Requires auth.**
 
 ---
 
-### get_withdraw_nonce
-
-Get current withdraw (settle) nonce from Orderly. **Requires auth.** Used for debugging; `prepare_orderly_withdraw` fetches it automatically.
-
----
-
 ## Trading
 
 ### create_order

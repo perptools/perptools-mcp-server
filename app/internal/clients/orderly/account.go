@@ -60,6 +60,16 @@ func ParseTokenHash(tokenSymbol string) string {
 // CreateWithdrawMessage builds the keccak256 hash (hex-encoded as bytes)
 // that the user's wallet must sign via Solana memo to withdraw from Orderly.
 func CreateWithdrawMessage(msg WithdrawMessage) ([]byte, error) {
+	hash, err := CreateWithdrawMessageHash(msg)
+	if err != nil {
+		return nil, err
+	}
+	return []byte(common.Bytes2Hex(hash)), nil
+}
+
+// CreateWithdrawMessageHash returns the raw 32-byte keccak256 hash to sign.
+// Used for Orderly POST /v1/withdraw_request — user signs this hash, then submits signature to API.
+func CreateWithdrawMessageHash(msg WithdrawMessage) ([]byte, error) {
 	brokerIDHash := keccak256String(msg.BrokerID)
 	tokenHash := keccak256String(msg.Token)
 	salt := keccak256String("Orderly Network")
@@ -91,6 +101,5 @@ func CreateWithdrawMessage(msg WithdrawMessage) ([]byte, error) {
 		return nil, err
 	}
 
-	msgToSign := crypto.Keccak256(packed)
-	return []byte(common.Bytes2Hex(msgToSign)), nil
+	return crypto.Keccak256(packed), nil
 }

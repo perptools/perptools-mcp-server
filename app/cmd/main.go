@@ -51,8 +51,9 @@ MARKET DATA (no auth needed):
 - health            — check API status.
 
 DEPOSIT/WITHDRAW:
-- prepare_orderly_deposit  — build deposit transaction (no auth). Sign with user's Solana wallet, then submit.
-- prepare_orderly_withdraw — build withdrawal transaction. REQUIRES AUTH — perform steps 1–6 first. If user wants to withdraw, start with authentication.
+- prepare_orderly_deposit  — build deposit transaction (no auth). Sign with user's Solana wallet, then submit to Solana.
+- prepare_orderly_withdraw — prepare withdrawal per Orderly API. REQUIRES AUTH. Returns message + transaction_base64. User signs the Solana tx, then call submit_orderly_withdraw with signature (0x-hex).
+- submit_orderly_withdraw  — submit signed withdrawal to Orderly API. Pass tx signature (hex 0x...) + message fields from prepare.
 
 WORKFLOW EXAMPLE — Open a LONG ETH position:
 1. Authenticate (steps 1-6 above).
