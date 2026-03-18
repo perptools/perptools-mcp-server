@@ -16,39 +16,6 @@ import (
 func RegisterOrderlyTools(svc *service.Service) []ToolDef {
 	return []ToolDef{
 		{
-			Tool: mcp.NewTool("prepare_orderly_deposit",
-				mcp.WithDescription("Build an unsigned Solana transaction that deposits tokens into the Orderly vault via LayerZero. The LayerZero cross-chain fee is fetched automatically via oappQuote simulation. Returns base64-encoded transaction for wallet signing."),
-				mcp.WithString("wallet_address", mcp.Required(), mcp.Description("Solana wallet public key (base58)")),
-				mcp.WithString("symbol", mcp.Required(), mcp.Description("Token symbol: USDC, USDT, or SOL")),
-				mcp.WithNumber("amount", mcp.Required(), mcp.Description("Amount in smallest token units (e.g. lamports for SOL, 1e6 units for USDC)")),
-			),
-			Handler: prepareOrderlyDeposit(svc),
-		},
-		{
-			Tool: mcp.NewTool("prepare_orderly_withdraw",
-				mcp.WithDescription("Prepare a withdrawal request per Orderly API. REQUIRES AUTH. Returns message + transaction_base64. User must sign the Solana transaction with their wallet, then call submit_orderly_withdraw with the transaction signature (hex with 0x prefix) and the message from this response."),
-				mcp.WithString("wallet_address", mcp.Required(), mcp.Description("Solana wallet public key (base58)")),
-				mcp.WithString("token", mcp.Required(), mcp.Description("Token symbol: USDC, USDT, or SOL")),
-				mcp.WithNumber("amount", mcp.Required(), mcp.Description("Amount in smallest token units (e.g. 1500000 for 1.5 USDC)")),
-			),
-			Handler: prepareOrderlyWithdraw(svc),
-		},
-		{
-			Tool: mcp.NewTool("submit_orderly_withdraw",
-				mcp.WithDescription("Submit a signed withdraw request to Orderly API. Call after prepare_orderly_withdraw: user signs the transaction_base64 (Solana tx), then pass the first signature as hex with 0x prefix (e.g. 0x1234...abcd) and the message fields from prepare."),
-				mcp.WithString("signature", mcp.Required(), mcp.Description("Hex signature (0x-prefixed) from signing the Solana transaction with user's wallet")),
-				mcp.WithString("broker_id", mcp.Required(), mcp.Description("From prepare response: message.brokerId")),
-				mcp.WithNumber("chain_id", mcp.Required(), mcp.Description("From prepare response: message.chainId (900900900)")),
-				mcp.WithString("receiver", mcp.Required(), mcp.Description("From prepare response: message.receiver (wallet address)")),
-				mcp.WithString("token", mcp.Required(), mcp.Description("From prepare response: message.token")),
-				mcp.WithString("amount", mcp.Required(), mcp.Description("From prepare response: message.amount")),
-				mcp.WithString("withdraw_nonce", mcp.Required(), mcp.Description("From prepare response: message.withdrawNonce")),
-				mcp.WithString("timestamp", mcp.Required(), mcp.Description("From prepare response: message.timestamp")),
-				mcp.WithString("chain_type", mcp.Description("From prepare response: message.chainType (default SOL)")),
-			),
-			Handler: submitOrderlyWithdraw(svc),
-		},
-		{
 			Tool: mcp.NewTool("create_order",
 				mcp.WithDescription(`Place a new order on Orderly. Requires authentication.
 
@@ -151,31 +118,6 @@ Call get_positions first to see current positions and entry prices. Only one act
 	}
 }
 
-func prepareOrderlyDeposit(svc *service.Service) server.ToolHandlerFunc {
-	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		wallet, err := req.RequireString("wallet_address")
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		symbol, err := req.RequireString("symbol")
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		amount := uint64(optNumber(req, "amount", 0))
-		if amount == 0 {
-			return mcp.NewToolResultError("amount is required and must be > 0"), nil
-		}
-
-		result, err := svc.PrepareOrderlyDeposit(ctx, wallet, symbol, amount)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("prepare deposit failed: %v", err)), nil
-		}
-
-		out, _ := json.Marshal(result)
-		return mcp.NewToolResultText(string(out)), nil
-	}
-}
-
 func createOrder(svc *service.Service) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		symbol, err := req.RequireString("symbol")
@@ -234,8 +176,7 @@ func formatOrderError(err error, req orderly.CreateOrderRequest) string {
 	switch {
 	case contains(apiErr.Message, "not enough", "insufficient", "balance", "margin", "collateral", "free_collateral"):
 		return fmt.Sprintf("%s\n\nThe account does not have enough collateral to place this order. "+
-			"The user needs to deposit more funds first using prepare_orderly_deposit. "+
-			"Tell the user their balance is insufficient and ask if they want to deposit.", base)
+			"Tell the user their balance is insufficient and they need to add more funds to their account.", base)
 
 	case contains(apiErr.Message, "quantity too small", "min_notional", "minimum"):
 		return fmt.Sprintf("%s\n\nThe order_quantity is below the minimum allowed for %s. "+
@@ -355,76 +296,5 @@ func cancelAlgoOrder(svc *service.Service) server.ToolHandlerFunc {
 		}
 
 		return mcp.NewToolResultText("Algo order cancelled successfully."), nil
-	}
-}
-
-func prepareOrderlyWithdraw(svc *service.Service) server.ToolHandlerFunc {
-	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		wallet, err := req.RequireString("wallet_address")
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		token, err := req.RequireString("token")
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		amount := uint64(optNumber(req, "amount", 0))
-		if amount == 0 {
-			return mcp.NewToolResultError("amount is required and must be > 0"), nil
-		}
-
-		result, err := svc.PrepareOrderlyWithdraw(ctx, wallet, token, amount)
-		if err != nil {
-			return mcp.NewToolResultError(formatAuthError("prepare withdraw", err)), nil
-		}
-
-		out, _ := json.Marshal(result)
-		return mcp.NewToolResultText(string(out)), nil
-	}
-}
-
-func submitOrderlyWithdraw(svc *service.Service) server.ToolHandlerFunc {
-	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		sig, err := req.RequireString("signature")
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		brokerID, _ := req.RequireString("broker_id")
-		chainID := int(optNumber(req, "chain_id", 0))
-		receiver, _ := req.RequireString("receiver")
-		token, _ := req.RequireString("token")
-		amount, _ := req.RequireString("amount")
-		withdrawNonce, _ := req.RequireString("withdraw_nonce")
-		timestamp, _ := req.RequireString("timestamp")
-		chainType := optString(req, "chain_type")
-		if chainType == "" {
-			chainType = "SOL"
-		}
-
-		if brokerID == "" || receiver == "" || token == "" || amount == "" || withdrawNonce == "" || timestamp == "" {
-			return mcp.NewToolResultError("broker_id, receiver, token, amount, withdraw_nonce, timestamp are required (from prepare_orderly_withdraw message)"), nil
-		}
-
-		msg := orderly.WithdrawRequestMessage{
-			BrokerID:      brokerID,
-			ChainID:       chainID,
-			Receiver:      receiver,
-			Token:         token,
-			Amount:        amount,
-			WithdrawNonce: withdrawNonce,
-			Timestamp:     timestamp,
-			ChainType:     chainType,
-		}
-
-		result, err := svc.SubmitOrderlyWithdraw(ctx, sig, msg)
-		if err != nil {
-			return mcp.NewToolResultError(formatAuthError("submit withdraw", err)), nil
-		}
-
-		out, _ := json.Marshal(map[string]any{
-			"withdraw_id": result.Data.WithdrawID,
-			"message":     "Withdraw request submitted successfully",
-		})
-		return mcp.NewToolResultText(string(out)), nil
 	}
 }

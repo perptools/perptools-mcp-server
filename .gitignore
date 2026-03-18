@@ -1,6 +1,7 @@
 # Env
 .env
 
+docs/
 # Build / binaries
 *.exe
 *.exe~

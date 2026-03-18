@@ -30,13 +30,13 @@ func main() {
 PREREQUISITE — Solana wallet access:
 This server requires the ability to sign messages and transactions with a Solana wallet. You MUST have access to either a wallet provider (e.g. connected wallet MCP, wallet extension) or the user's private key. Before starting any auth or trading flow, CHECK if you have a way to sign with the user's Solana wallet. If not, ask the user to provide a connected wallet or configure wallet access for you.
 
-AUTHENTICATION (required before trading AND withdraw):
+AUTHENTICATION (required before trading):
 1. Get the user's Solana wallet address (ask the user if needed).
 2. Call prepare_registration with wallet_address → if already_registered=true, skip to step 4.
 3. Sign the returned message_base64 with the user's Solana wallet → call complete_registration with the signature.
 4. Call prepare_orderly_key with wallet_address.
 5. Sign the returned message_base64 with the user's Solana wallet → call complete_orderly_key with the signature.
-6. Authentication is complete. All trading tools and prepare_orderly_withdraw are now available.
+6. Authentication is complete. All trading tools are now available.
 
 TRADING TOOLS (require authentication):
 - create_order        — place MARKET/LIMIT orders on PERP markets. Use order_quantity in base currency (ETH, BTC), NOT USDC.
@@ -49,11 +49,6 @@ TRADING TOOLS (require authentication):
 MARKET DATA (no auth needed):
 - get_markets       — list available trading pairs with prices.
 - health            — check API status.
-
-DEPOSIT/WITHDRAW:
-- prepare_orderly_deposit  — build deposit transaction (no auth). Sign with user's Solana wallet, then submit to Solana.
-- prepare_orderly_withdraw — prepare withdrawal per Orderly API. REQUIRES AUTH. Returns message + transaction_base64. User signs the Solana tx, then call submit_orderly_withdraw with signature (0x-hex).
-- submit_orderly_withdraw  — submit signed withdrawal to Orderly API. Pass tx signature (hex 0x...) + message fields from prepare.
 
 WORKFLOW EXAMPLE — Open a LONG ETH position:
 1. Authenticate (steps 1-6 above).
