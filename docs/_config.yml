@@ -1,8 +1,0 @@
-# Jekyll config for GitHub Pages
-title: Perptools MCP Server
-description: MCP server for Solana perpetual futures via Orderly Network and Perptools
-theme: minima
-
-plugins:
-  - jekyll-relative-links
-  - jekyll-optional-front-matter
