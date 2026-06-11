@@ -27,6 +27,7 @@ func init() {
 
 type testEnv struct {
 	ctx           context.Context
+	svc           *service.Service
 	toolMap       map[string]func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error)
 	walletAddress string
 	privKey       []byte
@@ -64,10 +65,23 @@ func setupAndAuth(t *testing.T) *testEnv {
 	for _, td := range tools.RegisterPerptoolsTools(svc) {
 		toolMap[td.Tool.Name] = td.Handler
 	}
+	for _, td := range tools.RegisterAIAgentTools(svc) {
+		toolMap[td.Tool.Name] = td.Handler
+	}
+	for _, td := range tools.RegisterMainDepositTools(svc) {
+		toolMap[td.Tool.Name] = td.Handler
+	}
+	for _, td := range tools.RegisterAgentStatsTools(svc) {
+		toolMap[td.Tool.Name] = td.Handler
+	}
+	for _, td := range tools.RegisterAIWithdrawalTools(svc) {
+		toolMap[td.Tool.Name] = td.Handler
+	}
 
 	ctx := context.Background()
 	env := &testEnv{
 		ctx:           ctx,
+		svc:           svc,
 		toolMap:       toolMap,
 		walletAddress: walletAddress,
 		privKey:       privKeyBytes,
@@ -180,6 +194,36 @@ func callTool(
 	}
 
 	return extractText(result)
+}
+
+// callToolSoft invokes a tool WITHOUT failing the test when the tool returns a
+// business error (IsError). It returns the response text and whether it was an
+// error. Use it when an error is an expected, informative outcome — e.g. a fresh
+// wallet that is not eligible to deploy or has no funds to deposit. It still
+// fails the test on a transport-level error (handler returning a Go error).
+func callToolSoft(
+	t *testing.T,
+	ctx context.Context,
+	toolMap map[string]func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error),
+	name string,
+	args map[string]any,
+) (text string, isErr bool) {
+	t.Helper()
+
+	handler, ok := toolMap[name]
+	if !ok {
+		t.Fatalf("tool %q not registered", name)
+	}
+
+	req := mcp.CallToolRequest{}
+	req.Params.Name = name
+	req.Params.Arguments = args
+
+	result, err := handler(ctx, req)
+	if err != nil {
+		t.Fatalf("tool %q returned transport error: %v", name, err)
+	}
+	return extractText(result), result.IsError
 }
 
 func extractText(r *mcp.CallToolResult) string {

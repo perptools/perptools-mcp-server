@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -48,6 +49,68 @@ type Client interface {
 	RegisterAgent(ctx context.Context, req RegisterAgentRequest) (*AgentResponse, error)
 	ImproveDescription(ctx context.Context, req ImproveDescriptionRequest) (*AgentDescriptionResponse, error)
 
+	// AI trading agents (Envy-backed) — routed through the /v1/ai/proxy gateway.
+	DeployAgent(ctx context.Context, publicKey string, req DeployAgentRequest) (*DeployAgentResponse, error)
+	// DepositToAgent moves USDC from the caller's already-funded Main Account
+	// into the agent vault (path /api/v1/agents/deposit).
+	DepositToAgent(ctx context.Context, publicKey string, req AgentDepositRequest) (*AgentDepositResponse, error)
+	// DirectDepositToAgent funds the agent vault in one step
+	// (path /api/v1/agents/direct-deposit). Same custodied-funds source.
+	DirectDepositToAgent(ctx context.Context, publicKey string, req AgentDepositRequest) (*AgentDepositResponse, error)
+	GetAgentTransactionStatus(ctx context.Context, publicKey string, req AgentTransactionStatusRequest) (*AgentTransactionStatusResponse, error)
+	// WithdrawFromAgent redeems vault SHARES back into the Main Account
+	// (path /api/v1/agents/withdraw). Settlement is tracked via the same
+	// transaction-status endpoint deposits use.
+	WithdrawFromAgent(ctx context.Context, publicKey string, req AgentWithdrawRequest) (*AgentWithdrawResponse, error)
+	// WithdrawFromMaster moves USDC from the Main Account to the registered
+	// on-chain wallet (path /api/v1/users/withdraw/solana). Synchronous —
+	// the on-chain transfer is done when it returns.
+	WithdrawFromMaster(ctx context.Context, publicKey string, req MasterWithdrawRequest) (*MasterWithdrawResponse, error)
+
+	// Risk-disclosure agreement (orderly-signed). A signed agreement gates the
+	// agent deposit flow — without it the backend returns ErrNotSignedAgreement.
+	GetAgreementStatus(ctx context.Context, publicKey string) (*AgreementStatusResponse, error)
+	VerifyAgreement(ctx context.Context, publicKey, signature string) (*AgreementStatusResponse, error)
+
+	// GetUserInfo returns the user's Envy profile, including the custodied Main
+	// Account address (solanaMasterWallet) — the on-chain top-up destination.
+	GetUserInfo(ctx context.Context, publicKey string) (*UserInfoResponse, error)
+	// GetDashboardOverview returns the user's Main Account USDC balance and agent counts.
+	GetDashboardOverview(ctx context.Context, publicKey string) (*DashboardOverviewResponse, error)
+
+	// Agent stats (read-only, via the orderly-signed proxy).
+	// GetArenaAgents lists the public agent leaderboard (path /api/data/arena,
+	// API-key auth signed server-side), sorted descending by sortBy.
+	GetArenaAgents(ctx context.Context, publicKey, sortBy string, page, pageSize int) (*ArenaResponse, error)
+	// GetAgentDetails returns one agent's profile, vault, analytics and the
+	// caller's stake (path /api/v1/agents/details).
+	GetAgentDetails(ctx context.Context, publicKey, agentID string) (*AgentDetailsResponse, error)
+	// GetAgentPositions returns an agent's trades (path /api/v1/agents/positions).
+	// posType filters by status (e.g. "open"); empty means all.
+	GetAgentPositions(ctx context.Context, publicKey, agentID, posType string, page, limit int) (*AgentPositionsResponse, error)
+	// GetAgentShares returns the caller's stake in one agent vault
+	// (path /api/v1/agents/shares).
+	GetAgentShares(ctx context.Context, publicKey, agentID string) (*AgentSharesResponse, error)
+	// GetMyAgents lists every agent the wallet holds vault shares in
+	// (path /api/v1/agents/list).
+	GetMyAgents(ctx context.Context, publicKey string) (*MyAgentsResponse, error)
+
+	// Agent chat — short-lived websocket sessions to the agent-chat relay.
+	// SendAgentMessage sends one user message to an AI agent and holds the
+	// socket open until the agent's reply quiesces (or timeout) — the relay
+	// persists the reply only while the session is live.
+	SendAgentMessage(ctx context.Context, publicKey, agentID, message string, timeout time.Duration) (*ChatReply, error)
+	// GetAgentChatHistory returns persisted chat history: the connect-time
+	// initial batch (newest 10) or, with before set, an older page via the
+	// relay's load_more (served from the backend's Postgres).
+	GetAgentChatHistory(ctx context.Context, publicKey, agentID, before string, limit int) (*ChatHistory, error)
+
+	// OrderlyRawPost sends an orderly-signed POST to an arbitrary path and
+	// returns the HTTP status + raw body. Used to probe whether gateway
+	// endpoints are reachable with orderly auth (diagnostics only).
+	OrderlyRawPost(ctx context.Context, path string, body any) (int, string, error)
+	OrderlyRawGet(ctx context.Context, path string, queryKey, queryVal string) (int, string, error)
+
 	RegisterReferralCode(ctx context.Context, publicKey, referralCode string) error
 
 	GetLoyaltyRules(ctx context.Context, publicKey string) ([]LoyaltyRule, error)
@@ -71,6 +134,13 @@ type client struct {
 	pubHTTP    *resty.Client
 	authedHTTP *resty.Client
 	adminHTTP  *resty.Client
+
+	// Orderly credentials, retained for the websocket agent-chat sessions
+	// (which sign their own auth frames instead of HTTP headers).
+	baseURL           string
+	accountID         string
+	orderlyPublicKey  string
+	orderlyPrivateKey ed25519.PrivateKey
 }
 
 func NewClient(baseURL string) Client {
@@ -85,6 +155,7 @@ func NewClient(baseURL string) Client {
 	return &client{
 		pubHTTP:    pubClient,
 		authedHTTP: authedClient,
+		baseURL:    baseURL,
 	}
 }
 
@@ -99,8 +170,12 @@ func NewClientWithAuth(baseURL, accountID, publicKey string, privateKey ed25519.
 	authedClient.OnBeforeRequest(orderlySignMiddleware(accountID, publicKey, privateKey))
 
 	return &client{
-		pubHTTP:    pubClient,
-		authedHTTP: authedClient,
+		pubHTTP:           pubClient,
+		authedHTTP:        authedClient,
+		baseURL:           baseURL,
+		accountID:         accountID,
+		orderlyPublicKey:  publicKey,
+		orderlyPrivateKey: privateKey,
 	}
 }
 
@@ -526,4 +601,235 @@ func (c *client) AdminApplyRoundPointsDistribution(ctx context.Context, roundSta
 		SetBody(map[string]string{"round_start": roundStart}).
 		Post("/v1/admin/points/distribution")
 	return checkErr(r, err, "admin apply round points distribution")
+}
+
+// ---------------------------------------------------------------------------
+// AI Agents (Envy-backed, via /v1/ai/proxy)
+// ---------------------------------------------------------------------------
+
+// aiProxy forwards an Envy call through the perptools AI proxy. publicKey must
+// equal the walletAddress inside body — the proxy rejects a mismatch. authType
+// 0 = HMAC-SHA256 (the Envy request is signed server-side with the house key).
+// The proxy responds with the raw Envy JSON, decoded into out.
+func (c *client) aiProxy(ctx context.Context, publicKey, path, method string, body, out any) error {
+	return c.aiProxyAuthType(ctx, publicKey, path, method, 0, body, out)
+}
+
+// aiProxyAuthType is aiProxy with an explicit Envy auth type: 0 = HMAC-SHA256
+// (per-user house signing), 1 = API key (privileged server credential; the
+// proxy allow-lists which paths may use it — e.g. /api/data/arena). Query
+// strings ride inside path verbatim; body must be a JSON object (use an empty
+// map, not nil, for body-less GETs — the proxy rejects non-object bodies).
+func (c *client) aiProxyAuthType(ctx context.Context, publicKey, path, method string, authType int, body, out any) error {
+	rawBody, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal proxy body: %w", err)
+	}
+	envelope := AIProxyRequest{
+		PublicKey: publicKey,
+		Path:      path,
+		Method:    method,
+		AuthType:  authType,
+		Body:      rawBody,
+	}
+	r, err := c.authedHTTP.R().SetContext(ctx).
+		SetBody(envelope).
+		SetResult(out).
+		Post("/v1/ai/proxy")
+	return checkErr(r, err, "ai proxy "+path)
+}
+
+func (c *client) DeployAgent(ctx context.Context, publicKey string, req DeployAgentRequest) (*DeployAgentResponse, error) {
+	var out DeployAgentResponse
+	if err := c.aiProxy(ctx, publicKey, "/api/v1/deploy/agent", http.MethodPost, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *client) DepositToAgent(ctx context.Context, publicKey string, req AgentDepositRequest) (*AgentDepositResponse, error) {
+	return c.agentDeposit(ctx, publicKey, "/api/v1/agents/deposit", req)
+}
+
+func (c *client) DirectDepositToAgent(ctx context.Context, publicKey string, req AgentDepositRequest) (*AgentDepositResponse, error) {
+	return c.agentDeposit(ctx, publicKey, "/api/v1/agents/direct-deposit", req)
+}
+
+func (c *client) agentDeposit(ctx context.Context, publicKey, path string, req AgentDepositRequest) (*AgentDepositResponse, error) {
+	var out AgentDepositResponse
+	if err := c.aiProxy(ctx, publicKey, path, http.MethodPost, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// WithdrawFromAgent redeems vault shares back into the Main Account (Envy
+// path /api/v1/agents/withdraw). Shares is denominated in SHARES, not USDC.
+// NOTE: /api/v1/agents/withdraw-all is blocked server-side ("withdraw-all is
+// not supported") — "all" is emulated by passing the full current share count.
+func (c *client) WithdrawFromAgent(ctx context.Context, publicKey string, req AgentWithdrawRequest) (*AgentWithdrawResponse, error) {
+	var out AgentWithdrawResponse
+	if err := c.aiProxy(ctx, publicKey, "/api/v1/agents/withdraw", http.MethodPost, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// WithdrawFromMaster moves USDC from the Main Account to the registered
+// on-chain wallet (Envy path /api/v1/users/withdraw/solana — the sdk-era
+// /api/sdk/withdraw/solana 404s upstream; live path verified by probing
+// 2026-06-10). Fully server-side and synchronous.
+func (c *client) WithdrawFromMaster(ctx context.Context, publicKey string, req MasterWithdrawRequest) (*MasterWithdrawResponse, error) {
+	var out MasterWithdrawResponse
+	if err := c.aiProxy(ctx, publicKey, "/api/v1/users/withdraw/solana", http.MethodPost, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *client) GetAgentTransactionStatus(ctx context.Context, publicKey string, req AgentTransactionStatusRequest) (*AgentTransactionStatusResponse, error) {
+	var out AgentTransactionStatusResponse
+	if err := c.aiProxy(ctx, publicKey, "/api/v1/agents/transaction/status", http.MethodPost, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetAgreementStatus reports whether the wallet has signed the risk-disclosure
+// agreement and returns the message that must be signed if it has not.
+func (c *client) GetAgreementStatus(ctx context.Context, publicKey string) (*AgreementStatusResponse, error) {
+	var out AgreementStatusResponse
+	r, err := c.authedHTTP.R().SetContext(ctx).
+		SetQueryParam("public_key", publicKey).
+		SetResult(&out).
+		Get("/v1/ai/agreement/status")
+	if e := checkErr(r, err, "get agreement status"); e != nil {
+		return nil, e
+	}
+	return &out, nil
+}
+
+// VerifyAgreement submits the wallet's ed25519 signature over the agreement
+// message (base58-encoded) and records the signature server-side.
+func (c *client) VerifyAgreement(ctx context.Context, publicKey, signature string) (*AgreementStatusResponse, error) {
+	var out AgreementStatusResponse
+	r, err := c.authedHTTP.R().SetContext(ctx).
+		SetBody(VerifyAgreementRequest{PublicKey: publicKey, Signature: signature}).
+		SetResult(&out).
+		Post("/v1/ai/agreement/verify")
+	if e := checkErr(r, err, "verify agreement"); e != nil {
+		return nil, e
+	}
+	return &out, nil
+}
+
+// GetUserInfo fetches the user's Envy profile (incl. solanaMasterWallet) via
+// the orderly-signed proxy (Envy path /api/v1/users/info).
+func (c *client) GetUserInfo(ctx context.Context, publicKey string) (*UserInfoResponse, error) {
+	var out UserInfoResponse
+	body := map[string]string{"walletAddress": publicKey}
+	if err := c.aiProxy(ctx, publicKey, "/api/v1/users/info", http.MethodPost, body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetDashboardOverview fetches the user's Main Account balance + agent counts
+// via the orderly-signed proxy (Envy path /api/v1/dashboard/overview).
+func (c *client) GetDashboardOverview(ctx context.Context, publicKey string) (*DashboardOverviewResponse, error) {
+	var out DashboardOverviewResponse
+	body := map[string]string{"walletAddress": publicKey}
+	if err := c.aiProxy(ctx, publicKey, "/api/v1/dashboard/overview", http.MethodPost, body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetArenaAgents fetches the public agent leaderboard (Envy path
+// /api/data/arena, API-key auth — allow-listed on the proxy). sortByDesc is
+// pinned to sortBy: without it the backend returns ASCENDING order (worst
+// first), which is never what a leaderboard caller wants.
+func (c *client) GetArenaAgents(ctx context.Context, publicKey, sortBy string, page, pageSize int) (*ArenaResponse, error) {
+	var out ArenaResponse
+	path := fmt.Sprintf("/api/data/arena?page=%d&pageSize=%d&sortBy=%s&sortByDesc=%s",
+		page, pageSize, url.QueryEscape(sortBy), url.QueryEscape(sortBy))
+	if err := c.aiProxyAuthType(ctx, publicKey, path, http.MethodGet, 1, map[string]any{}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetAgentDetails fetches one agent's profile, vault state, analytics and the
+// caller's stake (Envy path /api/v1/agents/details). walletAddress must equal
+// publicKey — the proxy rejects a mismatch.
+func (c *client) GetAgentDetails(ctx context.Context, publicKey, agentID string) (*AgentDetailsResponse, error) {
+	var out AgentDetailsResponse
+	body := map[string]string{"walletAddress": publicKey, "agentId": agentID}
+	if err := c.aiProxy(ctx, publicKey, "/api/v1/agents/details", http.MethodPost, body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetAgentPositions fetches an agent's trades (Envy path
+// /api/v1/agents/positions). posType filters by status (e.g. "open"); empty
+// returns all. page/limit <= 0 are omitted (backend defaults apply).
+func (c *client) GetAgentPositions(ctx context.Context, publicKey, agentID, posType string, page, limit int) (*AgentPositionsResponse, error) {
+	var out AgentPositionsResponse
+	body := map[string]any{"walletAddress": publicKey, "agentId": agentID}
+	if posType != "" {
+		body["type"] = posType
+	}
+	if page > 0 {
+		body["page"] = page
+	}
+	if limit > 0 {
+		body["limit"] = limit
+	}
+	if err := c.aiProxy(ctx, publicKey, "/api/v1/agents/positions", http.MethodPost, body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetAgentShares fetches the caller's stake in one agent vault (Envy path
+// /api/v1/agents/shares).
+func (c *client) GetAgentShares(ctx context.Context, publicKey, agentID string) (*AgentSharesResponse, error) {
+	var out AgentSharesResponse
+	body := map[string]string{"walletAddress": publicKey, "agentId": agentID}
+	if err := c.aiProxy(ctx, publicKey, "/api/v1/agents/shares", http.MethodPost, body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetMyAgents lists every agent the wallet currently holds vault shares in
+// (Envy path /api/v1/agents/list).
+func (c *client) GetMyAgents(ctx context.Context, publicKey string) (*MyAgentsResponse, error) {
+	var out MyAgentsResponse
+	body := map[string]string{"walletAddress": publicKey}
+	if err := c.aiProxy(ctx, publicKey, "/api/v1/agents/list", http.MethodPost, body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *client) OrderlyRawPost(ctx context.Context, path string, body any) (int, string, error) {
+	r, err := c.authedHTTP.R().SetContext(ctx).SetBody(body).Post(path)
+	if err != nil {
+		return 0, "", err
+	}
+	return r.StatusCode(), string(r.Body()), nil
+}
+
+func (c *client) OrderlyRawGet(ctx context.Context, path string, queryKey, queryVal string) (int, string, error) {
+	req := c.authedHTTP.R().SetContext(ctx)
+	if queryKey != "" {
+		req.SetQueryParam(queryKey, queryVal)
+	}
+	r, err := req.Get(path)
+	if err != nil {
+		return 0, "", err
+	}
+	return r.StatusCode(), string(r.Body()), nil
 }

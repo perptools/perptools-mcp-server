@@ -132,3 +132,13 @@ func optString(req mcp.CallToolRequest, key string) string {
 	}
 	return ""
 }
+
+func optBool(req mcp.CallToolRequest, key string, def bool) bool {
+	args := req.GetArguments()
+	if v, ok := args[key]; ok {
+		if b, ok := v.(bool); ok {
+			return b
+		}
+	}
+	return def
+}

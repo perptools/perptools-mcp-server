@@ -3,9 +3,12 @@ package service
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	"mcp-server/app/internal/clients/orderly"
 	"mcp-server/app/internal/clients/perptools"
+	"mcp-server/app/internal/clients/solfund"
 	"mcp-server/app/internal/service/auth"
 )
 
@@ -22,6 +25,7 @@ type Service struct {
 	orderly        orderly.Client
 	orderlyPrivate orderly.PrivateClient
 	perptools      perptools.Client
+	solfund        *solfund.Client
 }
 
 func NewService(cfg Config) *Service {
@@ -32,6 +36,7 @@ func NewService(cfg Config) *Service {
 		cfg:     cfg,
 		auth:    authSvc,
 		orderly: orderlyClient,
+		solfund: solfund.New(cfg.SolanaRPCURL),
 	}
 	s.perptools = perptools.NewClient(cfg.PerptoolsBaseURL)
 
@@ -116,6 +121,509 @@ func (s *Service) GetLeaderboard(ctx context.Context, publicKey string, limit, o
 	}
 	return s.perptools.GetLeaderboard(ctx, publicKey, limit, offset)
 }
+
+// --- AI Agents (Envy-backed, via the AI proxy) ---
+
+// DeployAgent deploys a new AI trading agent owned by req.WalletAddress.
+func (s *Service) DeployAgent(ctx context.Context, req perptools.DeployAgentRequest) (*perptools.DeployAgentResponse, error) {
+	if err := s.requireAuth(); err != nil {
+		return nil, err
+	}
+	return s.perptools.DeployAgent(ctx, req.WalletAddress, req)
+}
+
+// AgreementStatus returns whether the wallet has signed the risk-disclosure
+// agreement, along with the message it must sign if not. A signed agreement is
+// a precondition for depositing into an agent.
+func (s *Service) AgreementStatus(ctx context.Context, wallet string) (*perptools.AgreementStatusResponse, error) {
+	if err := s.requireAuth(); err != nil {
+		return nil, err
+	}
+	return s.perptools.GetAgreementStatus(ctx, wallet)
+}
+
+// SignAgreement records the wallet's signature over the risk-disclosure
+// agreement message. signature is the base58-encoded ed25519 signature of the
+// message returned by AgreementStatus.
+func (s *Service) SignAgreement(ctx context.Context, wallet, signature string) (*perptools.AgreementStatusResponse, error) {
+	if err := s.requireAuth(); err != nil {
+		return nil, err
+	}
+	return s.perptools.VerifyAgreement(ctx, wallet, signature)
+}
+
+// PrepareMainDepositViaProxy builds the wallet -> Main Account deposit
+// transaction through the orderly-signed Envy proxy (server-side HMAC), instead
+// of the browser-only session gateway.
+
+// MainDepositPlan is what PrepareMainDeposit hands back: the on-chain USDC
+// transfer (wallet -> Main Account) the wallet must sign and submit.
+type MainDepositPlan struct {
+	// MasterWallet is the custodied Main Account address (the transfer recipient).
+	MasterWallet string `json:"master_wallet"`
+	// Amount is the USDC amount being moved into the Main Account.
+	Amount float64 `json:"amount"`
+	// UnsignedTransaction is the base64 Solana transaction to sign with the
+	// user's wallet, then submit via CompleteMainDeposit.
+	UnsignedTransaction string `json:"unsigned_transaction"`
+}
+
+// PrepareMainDeposit builds the wallet -> Main Account top-up as a plain on-chain
+// USDC transfer to the user's custodied master wallet (resolved via the orderly
+// proxy). This is the MCP-reachable top-up: no browser session gateway. It
+// returns an UNSIGNED base64 transaction for the wallet to sign.
+func (s *Service) PrepareMainDeposit(ctx context.Context, wallet string, amount float64) (*MainDepositPlan, error) {
+	if err := s.requireAuth(); err != nil {
+		return nil, err
+	}
+	if amount <= 0 {
+		return nil, fmt.Errorf("amount must be > 0")
+	}
+	master, err := s.GetMasterWallet(ctx, wallet)
+	if err != nil {
+		return nil, err
+	}
+	walletPub, err := solfund.ParsePublicKey(wallet)
+	if err != nil {
+		return nil, fmt.Errorf("invalid wallet address: %w", err)
+	}
+	masterPub, err := solfund.ParsePublicKey(master)
+	if err != nil {
+		return nil, fmt.Errorf("invalid master address: %w", err)
+	}
+	tx, err := s.solfund.BuildUSDCTransfer(ctx, walletPub, masterPub, solfund.ToRaw(amount))
+	if err != nil {
+		return nil, fmt.Errorf("build deposit transaction: %w", err)
+	}
+	b64, err := tx.ToBase64()
+	if err != nil {
+		return nil, fmt.Errorf("encode transaction: %w", err)
+	}
+	return &MainDepositPlan{MasterWallet: master, Amount: amount, UnsignedTransaction: b64}, nil
+}
+
+// CompleteMainDeposit submits the signed wallet -> Main Account USDC transfer to
+// the Solana network and waits for confirmation. Returns the transaction
+// signature. Envy credits the Main Account from the on-chain balance.
+func (s *Service) CompleteMainDeposit(ctx context.Context, signedTransaction string) (string, error) {
+	if err := s.requireAuth(); err != nil {
+		return "", err
+	}
+	sig, err := s.solfund.SubmitBase64(ctx, signedTransaction)
+	if err != nil {
+		return "", err
+	}
+	return sig.String(), nil
+}
+
+// Balances is a snapshot an agent uses to decide whether (and how much) to top
+// up the Main Account before depositing into an agent.
+type Balances struct {
+	// WalletUSDC is the user's on-chain USDC (the source for a Main Account top-up).
+	WalletUSDC float64 `json:"wallet_usdc"`
+	// MainAccountUSDC is the spendable Main Account balance (the source deposit_to_agent uses).
+	MainAccountUSDC float64 `json:"main_account_usdc"`
+	// MasterWallet is the Main Account (custodied master) address.
+	MasterWallet string `json:"master_wallet"`
+}
+
+// GetBalances reports the user's on-chain wallet USDC and their Main Account
+// USDC, so an agent can decide whether a top-up is needed and for how much.
+func (s *Service) GetBalances(ctx context.Context, wallet string) (*Balances, error) {
+	if err := s.requireAuth(); err != nil {
+		return nil, err
+	}
+	info, err := s.perptools.GetUserInfo(ctx, wallet)
+	if err != nil {
+		return nil, err
+	}
+	walletPub, err := solfund.ParsePublicKey(wallet)
+	if err != nil {
+		return nil, fmt.Errorf("invalid wallet address: %w", err)
+	}
+	walRaw, err := s.solfund.USDCBalance(ctx, walletPub)
+	if err != nil {
+		return nil, fmt.Errorf("read wallet USDC balance: %w", err)
+	}
+	var mainUSDC float64
+	if dash, err := s.perptools.GetDashboardOverview(ctx, wallet); err == nil {
+		mainUSDC = dash.UsdcBalance
+	}
+	return &Balances{
+		WalletUSDC:      float64(walRaw) / 1e6,
+		MainAccountUSDC: mainUSDC,
+		MasterWallet:    info.SolanaMasterWallet,
+	}, nil
+}
+
+// GetMasterWallet returns the user's custodied Main Account (master) Solana
+// address — the on-chain destination for a wallet -> Main Account USDC transfer.
+func (s *Service) GetMasterWallet(ctx context.Context, wallet string) (string, error) {
+	if err := s.requireAuth(); err != nil {
+		return "", err
+	}
+	info, err := s.perptools.GetUserInfo(ctx, wallet)
+	if err != nil {
+		return "", err
+	}
+	if info.SolanaMasterWallet == "" {
+		return "", fmt.Errorf("no solana master wallet for %s (belongsToHouse=%v)", wallet, info.BelongsToHouse)
+	}
+	return info.SolanaMasterWallet, nil
+}
+
+// ProbeOrderlyPost is a diagnostics helper: orderly-signed POST to an arbitrary
+// path, returning status + raw body.
+func (s *Service) ProbeOrderlyPost(ctx context.Context, path string, body any) (int, string, error) {
+	if err := s.requireAuth(); err != nil {
+		return 0, "", err
+	}
+	return s.perptools.OrderlyRawPost(ctx, path, body)
+}
+
+// ProbeOrderlyGet is a diagnostics helper: orderly-signed GET to an arbitrary path.
+func (s *Service) ProbeOrderlyGet(ctx context.Context, path, queryKey, queryVal string) (int, string, error) {
+	if err := s.requireAuth(); err != nil {
+		return 0, "", err
+	}
+	return s.perptools.OrderlyRawGet(ctx, path, queryKey, queryVal)
+}
+
+// AgentDepositResult bundles the deposit acknowledgement with the final (or
+// last observed) transaction status after polling.
+type AgentDepositResult struct {
+	Deposit *perptools.AgentDepositResponse           `json:"deposit"`
+	Status  *perptools.AgentTransactionStatusResponse `json:"status,omitempty"`
+	// Settled is true only when the transaction reached a terminal state
+	// within the polling window. When false, poll get_agent_deposit_status
+	// later with deposit.transactionId.
+	Settled bool `json:"settled"`
+}
+
+// DepositToAgent moves USDC from the caller's already-funded Main Account into
+// the agent vault, then polls until the transaction settles. The funds are
+// signed server-side with the custodied master key, so no wallet signing
+// happens here. The Main Account must already hold enough USDC.
+func (s *Service) DepositToAgent(ctx context.Context, req perptools.AgentDepositRequest) (*AgentDepositResult, error) {
+	return s.depositAndPoll(ctx, req, false)
+}
+
+// DirectDepositToAgent funds the agent vault in a single step
+// (/api/v1/agents/direct-deposit), then polls until settlement. Same
+// custodied-funds source and server-side signing as DepositToAgent.
+func (s *Service) DirectDepositToAgent(ctx context.Context, req perptools.AgentDepositRequest) (*AgentDepositResult, error) {
+	return s.depositAndPoll(ctx, req, true)
+}
+
+func (s *Service) depositAndPoll(ctx context.Context, req perptools.AgentDepositRequest, direct bool) (*AgentDepositResult, error) {
+	if err := s.requireAuth(); err != nil {
+		return nil, err
+	}
+
+	var (
+		dep *perptools.AgentDepositResponse
+		err error
+	)
+	if direct {
+		dep, err = s.perptools.DirectDepositToAgent(ctx, req.WalletAddress, req)
+	} else {
+		dep, err = s.perptools.DepositToAgent(ctx, req.WalletAddress, req)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	res := &AgentDepositResult{Deposit: dep}
+	if !dep.Success || dep.TransactionID == "" {
+		return res, nil
+	}
+
+	statusReq := perptools.AgentTransactionStatusRequest{
+		WalletAddress: req.WalletAddress,
+		TransactionID: dep.TransactionID,
+	}
+	const (
+		pollInterval = 3 * time.Second
+		maxAttempts  = 20 // ~60s total
+	)
+	for i := 0; i < maxAttempts; i++ {
+		select {
+		case <-ctx.Done():
+			return res, nil // deposit is recorded; caller can poll later
+		case <-time.After(pollInterval):
+		}
+		st, err := s.perptools.GetAgentTransactionStatus(ctx, req.WalletAddress, statusReq)
+		if err != nil {
+			continue // transient — keep polling
+		}
+		res.Status = st
+		if isFinalTxStatus(st.Status) {
+			res.Settled = true
+			return res, nil
+		}
+	}
+	return res, nil
+}
+
+// AgentWithdrawResult bundles the withdraw acknowledgement with the final (or
+// last observed) transaction status after polling.
+type AgentWithdrawResult struct {
+	Withdraw *perptools.AgentWithdrawResponse          `json:"withdraw"`
+	Status   *perptools.AgentTransactionStatusResponse `json:"status,omitempty"`
+	// Settled is true only when the transaction reached a terminal state
+	// within the polling window. When false, poll get_agent_withdrawal_status
+	// later with withdraw.transactionId.
+	Settled bool `json:"settled"`
+	// SharesWithdrawn is the share count actually submitted — resolved from
+	// the caller's full holding when "all" was requested.
+	SharesWithdrawn float64 `json:"shares_withdrawn"`
+}
+
+// WithdrawFromAgentAndPoll redeems vault shares back into the Main Account,
+// then polls until the transaction settles (mirrors depositAndPoll). When all
+// is true the caller's full current share count is resolved first —
+// /api/v1/agents/withdraw-all is blocked server-side, so "all" is emulated by
+// submitting the full count. Large withdrawals may park in
+// WAITING_FOR_APPROVAL (manual review); queued=true means deferred execution
+// — in both cases keep polling.
+func (s *Service) WithdrawFromAgentAndPoll(ctx context.Context, req perptools.AgentWithdrawRequest, all bool) (*AgentWithdrawResult, error) {
+	if err := s.requireAuth(); err != nil {
+		return nil, err
+	}
+
+	if all {
+		sh, err := s.perptools.GetAgentShares(ctx, req.WalletAddress, req.AgentID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve current shares: %w", err)
+		}
+		if sh.UserShares.Shares <= 0 {
+			return nil, fmt.Errorf("no shares held in agent %s — nothing to withdraw", req.AgentID)
+		}
+		req.Shares = sh.UserShares.Shares
+	}
+	if req.Shares <= 0 {
+		return nil, fmt.Errorf("shares must be > 0 (or pass all=true)")
+	}
+
+	wd, err := s.perptools.WithdrawFromAgent(ctx, req.WalletAddress, req)
+	if err != nil {
+		return nil, err
+	}
+
+	res := &AgentWithdrawResult{Withdraw: wd, SharesWithdrawn: req.Shares}
+	if !wd.Success || wd.TransactionID == "" {
+		return res, nil
+	}
+	res.Status, res.Settled = s.pollAgentTransaction(ctx, req.WalletAddress, wd.TransactionID)
+	return res, nil
+}
+
+// pollAgentTransaction polls the agent transaction status (~60s) and returns
+// the last observed status plus whether it reached a terminal state.
+func (s *Service) pollAgentTransaction(ctx context.Context, wallet, txID string) (*perptools.AgentTransactionStatusResponse, bool) {
+	statusReq := perptools.AgentTransactionStatusRequest{
+		WalletAddress: wallet,
+		TransactionID: txID,
+	}
+	const (
+		pollInterval = 3 * time.Second
+		maxAttempts  = 20 // ~60s total
+	)
+	var last *perptools.AgentTransactionStatusResponse
+	for i := 0; i < maxAttempts; i++ {
+		select {
+		case <-ctx.Done():
+			return last, false // transaction is recorded; caller can poll later
+		case <-time.After(pollInterval):
+		}
+		st, err := s.perptools.GetAgentTransactionStatus(ctx, wallet, statusReq)
+		if err != nil {
+			continue // transient — keep polling
+		}
+		last = st
+		if isFinalTxStatus(st.Status) {
+			return last, true
+		}
+	}
+	return last, false
+}
+
+// WithdrawToWallet moves USDC from the Main Account to the user's REGISTERED
+// on-chain wallet (no other destination is possible). The transfer is fully
+// server-side and synchronous: when this returns successfully the on-chain tx
+// is already submitted. Preflights the Main Account balance to fail fast with
+// an actionable message instead of an opaque upstream error.
+//
+// The preflight trusts the LARGER of the dashboard ledger balance and the
+// master wallet's on-chain USDC: right after an agent withdrawal completes,
+// the proceeds sit on-chain at the master while the dashboard ledger lags
+// (verified live 2026-06-10) — and the on-chain balance is what Envy actually
+// spends. Envy remains the final arbiter and rejects a true shortfall.
+func (s *Service) WithdrawToWallet(ctx context.Context, wallet string, amount float64) (*perptools.MasterWithdrawResponse, error) {
+	if err := s.requireAuth(); err != nil {
+		return nil, err
+	}
+	if amount <= 0 {
+		return nil, fmt.Errorf("amount must be > 0")
+	}
+	bal, err := s.GetBalances(ctx, wallet)
+	if err != nil {
+		return nil, fmt.Errorf("preflight balance check: %w", err)
+	}
+	available := bal.MainAccountUSDC
+	if available < amount && bal.MasterWallet != "" {
+		if masterPub, perr := solfund.ParsePublicKey(bal.MasterWallet); perr == nil {
+			if raw, berr := s.solfund.USDCBalance(ctx, masterPub); berr == nil {
+				if onchain := float64(raw) / 1e6; onchain > available {
+					available = onchain
+				}
+			}
+		}
+	}
+	if available < amount {
+		return nil, fmt.Errorf(
+			"Main Account holds %.6f USDC — not enough to withdraw %.6f; withdraw from an agent first (withdraw_from_agent) or lower the amount",
+			available, amount)
+	}
+	return s.perptools.WithdrawFromMaster(ctx, wallet, perptools.MasterWithdrawRequest{
+		WalletAddress: wallet,
+		Amount:        amount,
+	})
+}
+
+// --- AI Agent stats (read-only; all routed through the orderly-signed proxy) ---
+//
+// NOTE: the backend also exposes an unauthenticated proxy
+// (/v1/ai/proxy/public) for arena/details/positions, but it is edge-gated and
+// returns a blanket 401 to headless callers (verified live 2026-06-10), so
+// every stats read goes through the authed proxy and requires auth.
+
+// ListArenaAgents returns one page of the public agent leaderboard, sorted
+// descending by sortBy (aum | pnl1h | pnl24h | pnl7d | pnl30d).
+func (s *Service) ListArenaAgents(ctx context.Context, wallet, sortBy string, page, pageSize int) (*perptools.ArenaResponse, error) {
+	if err := s.requireAuth(); err != nil {
+		return nil, err
+	}
+	return s.perptools.GetArenaAgents(ctx, wallet, sortBy, page, pageSize)
+}
+
+// AgentDetails returns one agent's profile, vault state, analytics and the
+// caller's stake in it.
+func (s *Service) AgentDetails(ctx context.Context, wallet, agentID string) (*perptools.AgentDetailsResponse, error) {
+	if err := s.requireAuth(); err != nil {
+		return nil, err
+	}
+	return s.perptools.GetAgentDetails(ctx, wallet, agentID)
+}
+
+// AgentPositions returns an agent's trades. posType filters by status
+// (e.g. "open"); empty returns all.
+func (s *Service) AgentPositions(ctx context.Context, wallet, agentID, posType string, page, limit int) (*perptools.AgentPositionsResponse, error) {
+	if err := s.requireAuth(); err != nil {
+		return nil, err
+	}
+	return s.perptools.GetAgentPositions(ctx, wallet, agentID, posType, page, limit)
+}
+
+// MyAgentStats returns the caller's stake in one agent vault (shares, share
+// price, current value, share of the vault) plus the vault aggregate.
+func (s *Service) MyAgentStats(ctx context.Context, wallet, agentID string) (*perptools.AgentSharesResponse, error) {
+	if err := s.requireAuth(); err != nil {
+		return nil, err
+	}
+	return s.perptools.GetAgentShares(ctx, wallet, agentID)
+}
+
+// Portfolio merges the dashboard overview with the per-agent share positions
+// into one snapshot of everything the user holds across AI agents.
+type Portfolio struct {
+	// USDCBalance is the spendable Main Account balance (deposit_to_agent's source).
+	USDCBalance float64 `json:"usdc_balance"`
+	// TotalPortfolioValue is the Main Account balance plus the value of all vault shares.
+	TotalPortfolioValue float64 `json:"total_portfolio_value"`
+	MyAgentCount        int     `json:"my_agent_count"`
+	ActiveAgentCount    int     `json:"active_agent_count"`
+	// TopPerformer is the user's best-performing agent, when the backend reports one.
+	TopPerformer *perptools.AgentInfo `json:"top_performer,omitempty"`
+	// Agents lists every agent the wallet holds vault shares in.
+	Agents []perptools.MyAgentSummary `json:"agents"`
+}
+
+// MyPortfolio merges /api/v1/dashboard/overview with /api/v1/agents/list. The
+// heavy per-agent series (pnlChart, latestReport) are stripped — callers that
+// need them should use AgentDetails.
+func (s *Service) MyPortfolio(ctx context.Context, wallet string) (*Portfolio, error) {
+	if err := s.requireAuth(); err != nil {
+		return nil, err
+	}
+	dash, err := s.perptools.GetDashboardOverview(ctx, wallet)
+	if err != nil {
+		return nil, err
+	}
+	list, err := s.perptools.GetMyAgents(ctx, wallet)
+	if err != nil {
+		return nil, fmt.Errorf("list my agents: %w", err)
+	}
+	agents := list.Agents
+	for i := range agents {
+		agents[i].PnlChart = nil
+		agents[i].LatestReport = nil
+	}
+	return &Portfolio{
+		USDCBalance:         dash.UsdcBalance,
+		TotalPortfolioValue: dash.TotalPortfolioValue,
+		MyAgentCount:        dash.MyAgentCount,
+		ActiveAgentCount:    dash.ActiveAgentCount,
+		TopPerformer:        dash.TopPerformer,
+		Agents:              agents,
+	}, nil
+}
+
+// --- Agent chat (websocket relay to the agent's Envy terminal) ---
+
+// SendAgentMessage sends one chat message to an AI agent over a short-lived
+// websocket session and waits for the agent's reply. The session is held open
+// until the reply quiesces (replies can span multiple frames and take tens of
+// seconds) or until timeout — closing early would lose the late reply, since
+// the relay persists agent output only inside the live session.
+func (s *Service) SendAgentMessage(ctx context.Context, wallet, agentID, message string, timeout time.Duration) (*perptools.ChatReply, error) {
+	if err := s.requireAuth(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(message) == "" {
+		return nil, fmt.Errorf("message must not be empty")
+	}
+	return s.perptools.SendAgentMessage(ctx, wallet, agentID, message, timeout)
+}
+
+// AgentChatHistory returns persisted chat history with an agent. An empty
+// `before` returns the newest batch; pass the returned cursor as `before` to
+// page further back.
+func (s *Service) AgentChatHistory(ctx context.Context, wallet, agentID, before string, limit int) (*perptools.ChatHistory, error) {
+	if err := s.requireAuth(); err != nil {
+		return nil, err
+	}
+	return s.perptools.GetAgentChatHistory(ctx, wallet, agentID, before, limit)
+}
+
+// GetAgentTransactionStatus reports the settlement state of a vault deposit or
+// withdrawal by its transaction id.
+func (s *Service) GetAgentTransactionStatus(ctx context.Context, req perptools.AgentTransactionStatusRequest) (*perptools.AgentTransactionStatusResponse, error) {
+	if err := s.requireAuth(); err != nil {
+		return nil, err
+	}
+	return s.perptools.GetAgentTransactionStatus(ctx, req.WalletAddress, req)
+}
+
+// isFinalTxStatus mirrors the Envy proxy's terminal-status set.
+func isFinalTxStatus(status string) bool {
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "COMPLETED", "FAILED", "CANCELLED", "CANCELED", "REJECTED", "CONFIRMED", "SUCCESS", "ERROR", "FAILURE":
+		return true
+	}
+	return false
+}
+
 
 // --- Orderly Trading (orders, positions) ---
 
