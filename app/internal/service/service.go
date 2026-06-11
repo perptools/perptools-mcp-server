@@ -70,6 +70,20 @@ func (s *Service) IsAuthenticated() bool {
 	return s.auth.IsAuthenticated()
 }
 
+// AuthenticatedWallet returns the wallet address of the fully authenticated
+// user (registration + orderly key complete), or "" when unauthenticated.
+// Used by telemetry to attribute usage events.
+func (s *Service) AuthenticatedWallet() string {
+	if !s.auth.IsAuthenticated() {
+		return ""
+	}
+	creds := s.auth.GetCredentials()
+	if creds == nil {
+		return ""
+	}
+	return creds.WalletAddress
+}
+
 func (s *Service) PrepareRegistration(ctx context.Context, walletAddress string) (*auth.PrepareResult, error) {
 	return s.auth.PrepareRegistration(ctx, walletAddress)
 }

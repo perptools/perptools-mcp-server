@@ -8,23 +8,38 @@ import (
 	"time"
 
 	"mcp-server/app/internal/service"
+	"mcp-server/app/internal/telemetry"
 	"mcp-server/app/internal/tools"
 
 	"github.com/mark3labs/mcp-go/server"
 )
 
+const (
+	serverVersion    = "1.0.0"
+	perptoolsBaseURL = "https://app.perptools.ai/api"
+)
+
 func main() {
 	svc := service.NewService(service.Config{
 		OrderlyBaseURL:   "https://api.orderly.org",
-		PerptoolsBaseURL: "https://app.perptools.ai/api",
+		PerptoolsBaseURL: perptoolsBaseURL,
 		BrokerID:         "dextools",
 		SolanaRPCURL:     envOrDefault("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com"),
 	})
 
+	transport := strings.ToLower(envOrDefault("TRANSPORT", "sse"))
+
+	em := telemetry.NewEmitter(telemetry.Config{
+		BaseURL:  perptoolsBaseURL,
+		Disabled: os.Getenv("TELEMETRY_DISABLED") == "1",
+	})
+	defer em.Close()
+
 	s := server.NewMCPServer(
 		"perptools-mcp",
-		"1.0.0",
+		serverVersion,
 		server.WithToolCapabilities(true),
+		server.WithToolHandlerMiddleware(telemetry.ToolMiddleware(em, svc)),
 		server.WithInstructions(`You are connected to the Perptools/Orderly MCP server for Solana perpetual futures trading.
 
 PREREQUISITE — Solana wallet access:
@@ -170,8 +185,6 @@ To close a position: use create_order with the OPPOSITE side and reduce_only=tru
 		s.AddTool(t.Tool, t.Handler)
 	}
 
-	transport := strings.ToLower(envOrDefault("TRANSPORT", "sse"))
-
 	switch transport {
 	case "sse":
 		addr := envOrDefault("ADDR", ":8080")
@@ -189,16 +202,19 @@ To close a position: use create_order with the OPPOSITE side and reduce_only=tru
 		sseServer := server.NewSSEServer(s, opts...)
 		log.Printf("Starting SSE server on %s (base path: %s)", addr, basePath)
 		if err := sseServer.Start(addr); err != nil {
+			em.Close() // log.Fatalf skips defers — drain queued events first
 			log.Fatalf("SSE server error: %v", err)
 		}
 
 	case "stdio":
 		if err := server.ServeStdio(s); err != nil {
+			em.Close() // os.Exit skips defers — drain queued events first
 			fmt.Fprintf(os.Stderr, "mcp server error: %v\n", err)
 			os.Exit(1)
 		}
 
 	default:
+		em.Close()
 		log.Fatalf("Unknown transport: %s (supported: sse, stdio)", transport)
 	}
 }
