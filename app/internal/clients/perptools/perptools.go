@@ -58,6 +58,9 @@ type Client interface {
 	// (path /api/v1/agents/direct-deposit). Same custodied-funds source.
 	DirectDepositToAgent(ctx context.Context, publicKey string, req AgentDepositRequest) (*AgentDepositResponse, error)
 	GetAgentTransactionStatus(ctx context.Context, publicKey string, req AgentTransactionStatusRequest) (*AgentTransactionStatusResponse, error)
+	// GetAgentTransactions lists the caller's deposits/withdrawals in one agent
+	// vault, newest first — the recovery path for a lost transaction id.
+	GetAgentTransactions(ctx context.Context, publicKey string, req AgentTransactionsRequest) (*AgentTransactionsResponse, error)
 	// WithdrawFromAgent redeems vault SHARES back into the Main Account
 	// (path /api/v1/agents/withdraw). Settlement is tracked via the same
 	// transaction-status endpoint deposits use.
@@ -690,6 +693,18 @@ func (c *client) WithdrawFromMaster(ctx context.Context, publicKey string, req M
 func (c *client) GetAgentTransactionStatus(ctx context.Context, publicKey string, req AgentTransactionStatusRequest) (*AgentTransactionStatusResponse, error) {
 	var out AgentTransactionStatusResponse
 	if err := c.aiProxy(ctx, publicKey, "/api/v1/agents/transaction/status", http.MethodPost, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetAgentTransactions lists the caller's vault transactions in one agent
+// (Envy path /api/v1/agents/transactions, probed live 2026-06-12). agentId is
+// required by the upstream. NOTE: /api/data/transactions (api-key auth) also
+// exists but returns ALL users' transactions unfiltered — never use it here.
+func (c *client) GetAgentTransactions(ctx context.Context, publicKey string, req AgentTransactionsRequest) (*AgentTransactionsResponse, error) {
+	var out AgentTransactionsResponse
+	if err := c.aiProxy(ctx, publicKey, "/api/v1/agents/transactions", http.MethodPost, req, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

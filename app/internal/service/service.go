@@ -393,13 +393,18 @@ type AgentWithdrawResult struct {
 	SharesWithdrawn float64 `json:"shares_withdrawn"`
 }
 
-// WithdrawFromAgentAndPoll redeems vault shares back into the Main Account,
-// then polls until the transaction settles (mirrors depositAndPoll). When all
-// is true the caller's full current share count is resolved first —
+// WithdrawFromAgentAndPoll redeems vault shares back into the Main Account
+// and returns the acknowledgement QUICKLY — only a short status confirm, not
+// a settlement wait. Withdrawals settle asynchronously and can take up to 24h
+// (manual approval, queued liquidity), while MCP clients time out in well
+// under a minute; a long in-call poll loses the whole response INCLUDING the
+// transaction id (observed live 2026-06-12 with a 60s client timeout). The
+// caller polls GetAgentTransactionStatus; a lost id is recoverable via
+// GetAgentTransactions.
+//
+// When all is true the caller's full current share count is resolved first —
 // /api/v1/agents/withdraw-all is blocked server-side, so "all" is emulated by
-// submitting the full count. Large withdrawals may park in
-// WAITING_FOR_APPROVAL (manual review); queued=true means deferred execution
-// — in both cases keep polling.
+// submitting the full count.
 func (s *Service) WithdrawFromAgentAndPoll(ctx context.Context, req perptools.AgentWithdrawRequest, all bool) (*AgentWithdrawResult, error) {
 	if err := s.requireAuth(); err != nil {
 		return nil, err
@@ -428,21 +433,21 @@ func (s *Service) WithdrawFromAgentAndPoll(ctx context.Context, req perptools.Ag
 	if !wd.Success || wd.TransactionID == "" {
 		return res, nil
 	}
-	res.Status, res.Settled = s.pollAgentTransaction(ctx, req.WalletAddress, wd.TransactionID)
+	res.Status, res.Settled = s.pollAgentTransaction(ctx, req.WalletAddress, wd.TransactionID, 2)
 	return res, nil
 }
 
-// pollAgentTransaction polls the agent transaction status (~60s) and returns
-// the last observed status plus whether it reached a terminal state.
-func (s *Service) pollAgentTransaction(ctx context.Context, wallet, txID string) (*perptools.AgentTransactionStatusResponse, bool) {
+// pollAgentTransaction checks the agent transaction status up to maxAttempts
+// times (3s apart) and returns the last observed status plus whether it
+// reached a terminal state. Keep maxAttempts SMALL on the submit path: the
+// total time must stay far below MCP client timeouts, or the caller loses the
+// acknowledgement with the transaction id in it.
+func (s *Service) pollAgentTransaction(ctx context.Context, wallet, txID string, maxAttempts int) (*perptools.AgentTransactionStatusResponse, bool) {
 	statusReq := perptools.AgentTransactionStatusRequest{
 		WalletAddress: wallet,
 		TransactionID: txID,
 	}
-	const (
-		pollInterval = 3 * time.Second
-		maxAttempts  = 20 // ~60s total
-	)
+	const pollInterval = 3 * time.Second
 	var last *perptools.AgentTransactionStatusResponse
 	for i := 0; i < maxAttempts; i++ {
 		select {
@@ -622,6 +627,17 @@ func (s *Service) AgentChatHistory(ctx context.Context, wallet, agentID, before 
 
 // GetAgentTransactionStatus reports the settlement state of a vault deposit or
 // withdrawal by its transaction id.
+// GetAgentTransactions lists the caller's deposits/withdrawals in one agent
+// vault, newest first. This is the recovery path when a withdraw/deposit
+// acknowledgement (and its transaction id) was lost to a client-side timeout,
+// and the way to find an in-flight withdrawal blocking a new one.
+func (s *Service) GetAgentTransactions(ctx context.Context, req perptools.AgentTransactionsRequest) (*perptools.AgentTransactionsResponse, error) {
+	if err := s.requireAuth(); err != nil {
+		return nil, err
+	}
+	return s.perptools.GetAgentTransactions(ctx, req.WalletAddress, req)
+}
+
 func (s *Service) GetAgentTransactionStatus(ctx context.Context, req perptools.AgentTransactionStatusRequest) (*perptools.AgentTransactionStatusResponse, error) {
 	if err := s.requireAuth(); err != nil {
 		return nil, err

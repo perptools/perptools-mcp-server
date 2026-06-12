@@ -304,6 +304,52 @@ type AgentTransactionStatusResponse struct {
 	TransactionHash *string  `json:"transactionHash,omitempty"`
 }
 
+// AgentTransactionsRequest is the Envy /api/v1/agents/transactions body. The
+// agent scope is REQUIRED — without agentId the endpoint answers 404 "Agent
+// not found in your house" (probed live 2026-06-12). The legacy
+// /api/sdk/agent/transactions path 404s upstream, like the rest of /api/sdk/*.
+type AgentTransactionsRequest struct {
+	WalletAddress string `json:"walletAddress"`
+	AgentID       string `json:"agentId"`
+	Page          int    `json:"page,omitempty"`
+	Limit         int    `json:"limit,omitempty"`
+}
+
+// AgentTransaction is one vault money movement (deposit or withdrawal) for the
+// caller in one agent. ID is the same transaction id that
+// /api/v1/agents/transaction/status accepts — listing transactions is the
+// recovery path when a withdraw/deposit acknowledgement was lost client-side
+// (e.g. the MCP client timed out before the ack arrived).
+type AgentTransaction struct {
+	ID              string  `json:"id"`
+	Type            string  `json:"type"` // DEPOSIT | WITHDRAWAL
+	Amount          float64 `json:"amount"`
+	Shares          float64 `json:"shares"`
+	SharePrice      float64 `json:"sharePrice"`
+	Status          string  `json:"status"` // PENDING / PENDING_APPROVAL / QUEUED / COMPLETED / FAILED / ...
+	TransactionHash *string `json:"transactionHash,omitempty"`
+	Notes           *string `json:"notes,omitempty"`
+	CreatedAt       string  `json:"createdAt"`
+}
+
+// AgentTransactionsPagination is the list paging block ({total, page, limit,
+// totalPages}).
+type AgentTransactionsPagination struct {
+	Total      int `json:"total"`
+	Page       int `json:"page"`
+	Limit      int `json:"limit"`
+	TotalPages int `json:"totalPages"`
+}
+
+// AgentTransactionsResponse is the /api/v1/agents/transactions result, newest
+// first.
+type AgentTransactionsResponse struct {
+	Success      bool                        `json:"success"`
+	Transactions []AgentTransaction          `json:"transactions"`
+	Pagination   AgentTransactionsPagination `json:"pagination"`
+	Error        string                      `json:"error,omitempty"`
+}
+
 // AgreementStatusResponse is returned by GET /v1/ai/agreement/status and
 // POST /v1/ai/agreement/verify. Message is the exact text the wallet must sign;
 // Signed reports whether the risk-disclosure agreement is already on file.

@@ -27,17 +27,26 @@ is 1.25, withdraw 4 shares.
 Pass EITHER 'shares' (0 < shares <= what you hold) OR 'all': true (redeems your entire stake —
 resolved automatically from your current holding; there is no server-side withdraw-all).
 
-BEHAVIOUR: submits the withdrawal and polls its status (~60s). Returns {transaction_id, status,
-settled, queued, queued_request_id, shares_withdrawn}.
-- settled=false        -> not finished yet; follow up with get_agent_withdrawal_status.
+BEHAVIOUR: submits the withdrawal and returns the acknowledgement QUICKLY (~10s; one short status
+confirm, NO settlement wait). Returns {withdraw: {transactionId, queued, queuedRequestId}, status,
+settled, shares_withdrawn}.
+
+SAVE withdraw.transactionId FROM THE RESPONSE IMMEDIATELY — it is the handle for all follow-ups.
+If you lost it (e.g. your client timed out), recover it with get_agent_transactions: the
+withdrawal WAS created server-side even if you never saw this response.
+
+SETTLEMENT IS ASYNCHRONOUS AND CAN TAKE UP TO 24 HOURS. Expect settled=false here; that is
+normal, not an error. Check progress with get_agent_withdrawal_status (poll occasionally, e.g.
+every few minutes — not in a tight loop):
 - queued=true          -> the vault's liquidity is tied up in open positions; Envy executes the
-                          withdrawal when liquidity frees up. Keep polling — this is normal.
-- WAITING_FOR_APPROVAL -> large withdrawals require manual admin review and can take HOURS. The
-                          request is NOT stuck; keep polling get_agent_withdrawal_status later.
+                          withdrawal when liquidity frees up.
+- WAITING_FOR_APPROVAL / PENDING_APPROVAL -> manual admin review; can take HOURS (up to ~24h).
+                          The request is NOT stuck.
 
 RULES:
-- Only ONE pending withdrawal per agent at a time — a second one is rejected while the first is
-  in flight.
+- Only ONE pending withdrawal per agent at a time — a second one is rejected with "You already
+  have a withdrawal in progress" while the first is in flight. If you hit that without a known
+  transaction_id, find the pending one via get_agent_transactions.
 - Proceeds land in the MAIN ACCOUNT (check with get_balances -> main_account_usdc), NOT the
   on-chain wallet. To reach the wallet, follow up with withdraw_to_wallet.
 - LEDGER LAG: even after status COMPLETED, main_account_usdc may read 0 for a few minutes while
@@ -54,17 +63,45 @@ RULES:
 			Tool: mcp.NewTool("get_agent_withdrawal_status",
 				mcp.WithDescription(`Check the settlement status of an agent vault withdrawal by transaction_id. Requires authentication.
 
-Use this to follow up on a withdraw_from_agent that returned "settled": false. Poll until the
-status reaches a terminal state (COMPLETED/CONFIRMED = success, FAILED/REJECTED/CANCELLED =
-failure). Two non-terminal states are NORMAL and just mean "wait longer":
-- WAITING_FOR_APPROVAL — large withdrawals go through manual admin review (can take hours).
-- queued execution     — vault liquidity is locked in open positions; Envy settles when it frees up.
+Use this to follow up on a withdraw_from_agent (which returns immediately, before settlement).
+Settlement is ASYNCHRONOUS and can take UP TO 24 HOURS — check occasionally (every few minutes,
+then back off), don't poll in a tight loop. Terminal states: COMPLETED/CONFIRMED = success,
+FAILED/REJECTED/CANCELLED = failure. Two non-terminal states are NORMAL and just mean "wait
+longer":
+- WAITING_FOR_APPROVAL / PENDING_APPROVAL — manual admin review (can take hours, up to ~24h).
+- queued execution — vault liquidity is locked in open positions; Envy settles when it frees up.
+
+Lost the transaction_id? List the agent's transactions with get_agent_transactions and take the
+id of the pending WITHDRAWAL row.
 
 After it completes, verify the proceeds with get_balances (main_account_usdc goes up).`),
 				mcp.WithString("wallet_address", mcp.Required(), mcp.Description("Wallet address that made the withdrawal (base58)")),
-				mcp.WithString("transaction_id", mcp.Required(), mcp.Description("The transaction_id returned by withdraw_from_agent")),
+				mcp.WithString("transaction_id", mcp.Required(), mcp.Description("The transaction_id returned by withdraw_from_agent (recoverable via get_agent_transactions)")),
 			),
 			Handler: getAgentWithdrawalStatus(svc),
+		},
+		{
+			Tool: mcp.NewTool("get_agent_transactions",
+				mcp.WithDescription(`List YOUR deposit/withdrawal history in one AI agent's vault, newest first. Requires authentication.
+
+Each entry: {id, type: DEPOSIT|WITHDRAWAL, amount (USDC), shares, sharePrice, status,
+transactionHash, notes, createdAt}. The "id" is a transaction_id usable with
+get_agent_withdrawal_status / get_agent_deposit_status.
+
+USE THIS TO RECOVER from a lost acknowledgement: if withdraw_from_agent or deposit_to_agent was
+interrupted (client timeout, dropped connection) and you never saw the transaction_id, the
+operation was still created server-side — find it here as the newest matching row. Also the way
+to locate the in-flight withdrawal behind a "You already have a withdrawal in progress" rejection
+(non-terminal status: PENDING / PENDING_APPROVAL / QUEUED).
+
+agent_id is REQUIRED by the upstream. If you don't know which agent, list your agents with
+get_my_portfolio and check each.`),
+				mcp.WithString("wallet_address", mcp.Required(), mcp.Description("Holder's Solana wallet address (base58). Must match the authenticated user.")),
+				mcp.WithString("agent_id", mcp.Required(), mcp.Description("Agent whose transaction history to list")),
+				mcp.WithNumber("page", mcp.Description("Page number, 1-based (default 1)")),
+				mcp.WithNumber("limit", mcp.Description("Page size (default 20)")),
+			),
+			Handler: getAgentTransactions(svc),
 		},
 		{
 			Tool: mcp.NewTool("withdraw_to_wallet",
@@ -143,6 +180,30 @@ func getAgentWithdrawalStatus(svc *service.Service) server.ToolHandlerFunc {
 		})
 		if err != nil {
 			return mcp.NewToolResultError(formatAuthError("get agent withdrawal status", err)), nil
+		}
+		return jsonResult(resp)
+	}
+}
+
+func getAgentTransactions(svc *service.Service) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		wallet, err := req.RequireString("wallet_address")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		agentID, err := req.RequireString("agent_id")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		resp, err := svc.GetAgentTransactions(ctx, perptools.AgentTransactionsRequest{
+			WalletAddress: wallet,
+			AgentID:       agentID,
+			Page:          int(optNumber(req, "page", 1)),
+			Limit:         int(optNumber(req, "limit", 20)),
+		})
+		if err != nil {
+			return mcp.NewToolResultError(formatAuthError("get agent transactions", err)), nil
 		}
 		return jsonResult(resp)
 	}
