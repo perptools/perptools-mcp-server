@@ -13,6 +13,23 @@ func formatAuthError(operation string, err error) string {
 	}
 	msg := err.Error()
 
+	// Ownership/authorization errors must be caught BEFORE the auth-required
+	// check: the upstream "Access denied — you don't own this agent" bubbles up
+	// alongside an unrelated "got 401" from a fallback endpoint, and that 401
+	// substring would otherwise misclassify it as an authentication failure —
+	// sending the agent into a pointless re-auth loop. This is NOT fixable by
+	// re-authenticating; the caller must target an agent the wallet owns.
+	if isOwnershipError(msg) {
+		return fmt.Sprintf(`ACCESS DENIED: this wallet does not own that agent (or it does not exist / is archived).
+
+Error: %s
+
+This is NOT an authentication problem — repeating the auth flow will not help. The agent chat and
+control tools (send_agent_message, stop_agent, delete_agent, ...) work only on agents the
+AUTHENTICATED wallet owns. Find an agent you own with list_agents or get_my_portfolio, then retry
+with that agent_id and your own wallet_address.`, msg)
+	}
+
 	if !isAuthRequiredError(msg) {
 		return fmt.Sprintf("%s failed: %v", operation, err)
 	}
@@ -25,6 +42,16 @@ Error: %s
 GUIDANCE: %s
 
 After completing the steps above, retry the original request.`, msg, guidance)
+}
+
+// isOwnershipError detects an upstream authorization/ownership rejection — the
+// caller asked to act on an agent the authenticated wallet does not own. These
+// must not be treated as authentication failures.
+func isOwnershipError(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "own this agent") || // "...you don't own this agent"
+		strings.Contains(lower, "not owned by you") ||
+		strings.Contains(lower, "access denied")
 }
 
 func isAuthRequiredError(msg string) bool {
