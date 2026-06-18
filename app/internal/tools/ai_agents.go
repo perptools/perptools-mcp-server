@@ -131,6 +131,78 @@ finish within the in-call polling window). Poll until the status reaches a termi
 			),
 			Handler: getAgentDepositStatus(svc),
 		},
+		{
+			Tool: mcp.NewTool("stop_agent",
+				mcp.WithDescription(`Stop (pause) an AI trading agent the user owns — halts its trading WITHOUT deleting it. Requires authentication.
+
+The agent's vault and the caller's stake stay intact; only trading is suspended (status -> STOPPING/PAUSED). Use start_agent to resume. For permanent removal use delete_agent instead.
+
+Only the agent's owner can stop it; wallet_address MUST be the authenticated user's wallet.`),
+				mcp.WithString("wallet_address", mcp.Required(), mcp.Description("Owner's Solana wallet address (base58). Must match the authenticated user.")),
+				mcp.WithString("agent_id", mcp.Required(), mcp.Description("The agent to stop (the agent_id / botId)")),
+			),
+			Handler: setAgentRunning(svc, false),
+		},
+		{
+			Tool: mcp.NewTool("start_agent",
+				mcp.WithDescription(`Resume a previously stopped AI trading agent (status -> ACTIVE). Requires authentication. The counterpart to stop_agent. Only the owner can start it; wallet_address MUST be the authenticated user's wallet.`),
+				mcp.WithString("wallet_address", mcp.Required(), mcp.Description("Owner's Solana wallet address (base58). Must match the authenticated user.")),
+				mcp.WithString("agent_id", mcp.Required(), mcp.Description("The agent to resume (the agent_id / botId)")),
+			),
+			Handler: setAgentRunning(svc, true),
+		},
+		{
+			Tool: mcp.NewTool("delete_agent",
+				mcp.WithDescription(`Permanently archive (DELETE) an AI trading agent the user owns. Requires authentication. THIS IS IRREVERSIBLE.
+
+WITHDRAW FIRST: redeem any remaining stake with withdraw_from_agent before deleting — archiving an agent that still holds your funds can strand them. To merely pause trading, use stop_agent instead (reversible).
+
+Only the agent's owner can delete it; wallet_address MUST be the authenticated user's wallet.`),
+				mcp.WithString("wallet_address", mcp.Required(), mcp.Description("Owner's Solana wallet address (base58). Must match the authenticated user.")),
+				mcp.WithString("agent_id", mcp.Required(), mcp.Description("The agent to delete/archive (the agent_id / botId)")),
+			),
+			Handler: deleteAgent(svc),
+		},
+	}
+}
+
+func setAgentRunning(svc *service.Service, running bool) server.ToolHandlerFunc {
+	op := "stop agent"
+	if running {
+		op = "start agent"
+	}
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		wallet, err := req.RequireString("wallet_address")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		agentID, err := req.RequireString("agent_id")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		resp, err := svc.SetAgentRunning(ctx, wallet, agentID, running)
+		if err != nil {
+			return mcp.NewToolResultError(formatAuthError(op, err)), nil
+		}
+		return jsonResult(resp)
+	}
+}
+
+func deleteAgent(svc *service.Service) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		wallet, err := req.RequireString("wallet_address")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		agentID, err := req.RequireString("agent_id")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		resp, err := svc.DeleteAgent(ctx, wallet, agentID)
+		if err != nil {
+			return mcp.NewToolResultError(formatAuthError("delete agent", err)), nil
+		}
+		return jsonResult(resp)
 	}
 }
 

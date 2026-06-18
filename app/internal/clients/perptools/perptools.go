@@ -65,6 +65,12 @@ type Client interface {
 	// (path /api/v1/agents/withdraw). Settlement is tracked via the same
 	// transaction-status endpoint deposits use.
 	WithdrawFromAgent(ctx context.Context, publicKey string, req AgentWithdrawRequest) (*AgentWithdrawResponse, error)
+	// AdminAgent stops/starts an agent the caller owns
+	// (path /api/v1/creator/admin, command "stop" | "start").
+	AdminAgent(ctx context.Context, publicKey string, req AgentAdminRequest) (*AgentControlResponse, error)
+	// ArchiveAgent permanently deletes an agent the caller owns
+	// (path /api/v1/creator/agents/archive).
+	ArchiveAgent(ctx context.Context, publicKey string, req AgentArchiveRequest) (*AgentControlResponse, error)
 	// WithdrawFromMaster moves USDC from the Main Account to the registered
 	// on-chain wallet (path /api/v1/users/withdraw/solana). Synchronous —
 	// the on-chain transfer is done when it returns.
@@ -641,6 +647,22 @@ func (c *client) aiProxyAuthType(ctx context.Context, publicKey, path, method st
 func (c *client) DeployAgent(ctx context.Context, publicKey string, req DeployAgentRequest) (*DeployAgentResponse, error) {
 	var out DeployAgentResponse
 	if err := c.aiProxy(ctx, publicKey, "/api/v1/deploy/agent", http.MethodPost, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *client) AdminAgent(ctx context.Context, publicKey string, req AgentAdminRequest) (*AgentControlResponse, error) {
+	var out AgentControlResponse
+	if err := c.aiProxy(ctx, publicKey, "/api/v1/creator/admin", http.MethodPost, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *client) ArchiveAgent(ctx context.Context, publicKey string, req AgentArchiveRequest) (*AgentControlResponse, error) {
+	var out AgentControlResponse
+	if err := c.aiProxy(ctx, publicKey, "/api/v1/creator/agents/archive", http.MethodPost, req, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

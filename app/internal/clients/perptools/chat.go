@@ -290,16 +290,23 @@ func (c *client) dialChat(ctx context.Context, publicKey, agentID string) (*chat
 	}
 	query := chatQuery(publicKey, agentID)
 
-	var lastErr error
+	// Try each variant; aggregate EVERY failure (not just the last). The last
+	// candidate (/v1/ai/ws) tends to 401, so surfacing only it masked the real
+	// reason the legacy signature-exempt alias failed — making every problem
+	// look like a bare "401". With all four reported, an edge-gate (every
+	// variant 401s), a base-URL mismatch (404/dial errors), and a genuine auth
+	// rejection are immediately distinguishable.
+	errs := make([]string, 0, len(chatEndpoints))
 	for _, ep := range chatEndpoints {
 		sess, err := c.dialChatEndpoint(ctx, ep, query)
-		if err != nil {
-			lastErr = fmt.Errorf("%s (signed %s): %w", ep.dialPath, ep.signedBase, err)
-			continue
+		if err == nil {
+			return sess, nil
 		}
-		return sess, nil
+		errs = append(errs, fmt.Sprintf("[dial %s | signed %s | upgradeHdr=%v] %v",
+			ep.dialPath, ep.signedBase, ep.upgradeHdr, err))
 	}
-	return nil, fmt.Errorf("agent chat: all endpoint variants failed, last: %w", lastErr)
+	return nil, fmt.Errorf("agent chat: all %d endpoint variants failed (ws base=%s):\n  %s",
+		len(chatEndpoints), c.wsBaseURL(), strings.Join(errs, "\n  "))
 }
 
 func (c *client) dialChatEndpoint(ctx context.Context, ep chatEndpoint, query string) (*chatSession, error) {

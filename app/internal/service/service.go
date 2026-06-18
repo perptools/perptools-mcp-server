@@ -151,6 +151,36 @@ func (s *Service) DeployAgent(ctx context.Context, req perptools.DeployAgentRequ
 	return s.perptools.DeployAgent(ctx, req.WalletAddress, req)
 }
 
+// SetAgentRunning stops (running=false) or resumes (running=true) an agent the
+// caller owns. Stopping halts the agent's trading without deleting it; the
+// stake stays in the vault and resume restarts it.
+func (s *Service) SetAgentRunning(ctx context.Context, walletAddress, agentID string, running bool) (*perptools.AgentControlResponse, error) {
+	if err := s.requireAuth(); err != nil {
+		return nil, err
+	}
+	cmd := "stop"
+	if running {
+		cmd = "start"
+	}
+	return s.perptools.AdminAgent(ctx, walletAddress, perptools.AgentAdminRequest{
+		WalletAddress: walletAddress,
+		BotID:         agentID,
+		Command:       cmd,
+	})
+}
+
+// DeleteAgent permanently archives an agent the caller owns. Withdraw any stake
+// first (withdraw_from_agent) — archiving is irreversible.
+func (s *Service) DeleteAgent(ctx context.Context, walletAddress, agentID string) (*perptools.AgentControlResponse, error) {
+	if err := s.requireAuth(); err != nil {
+		return nil, err
+	}
+	return s.perptools.ArchiveAgent(ctx, walletAddress, perptools.AgentArchiveRequest{
+		WalletAddress: walletAddress,
+		BotID:         agentID,
+	})
+}
+
 // AgreementStatus returns whether the wallet has signed the risk-disclosure
 // agreement, along with the message it must sign if not. A signed agreement is
 // a precondition for depositing into an agent.

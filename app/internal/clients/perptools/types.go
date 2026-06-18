@@ -698,6 +698,31 @@ type AgentWithdrawResponse struct {
 	Message         string `json:"message,omitempty"`
 }
 
+// AgentAdminRequest is the Envy /api/v1/creator/admin body — operational
+// control of an agent the caller owns. Command is "stop" (halt trading ->
+// STOPPING/PAUSED) or "start" (resume -> ACTIVE).
+type AgentAdminRequest struct {
+	WalletAddress string `json:"walletAddress"`
+	BotID         string `json:"botId"`
+	Command       string `json:"command"`
+}
+
+// AgentArchiveRequest is the Envy /api/v1/creator/agents/archive body —
+// permanently archives (deletes) an agent the caller owns.
+type AgentArchiveRequest struct {
+	WalletAddress string `json:"walletAddress"`
+	BotID         string `json:"botId"`
+}
+
+// AgentControlResponse is the envelope returned by the agent stop/start and
+// archive endpoints. Kept permissive: unknown fields are ignored.
+type AgentControlResponse struct {
+	Success bool   `json:"success"`
+	Status  string `json:"status,omitempty"`
+	Message string `json:"message,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
 // MasterWithdrawRequest is the Envy /api/v1/users/withdraw/solana body.
 // Amount is in USDC. The destination is ALWAYS the registered wallet —
 // there is no destination parameter.
