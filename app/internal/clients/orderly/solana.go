@@ -1,10 +1,13 @@
 package orderly
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 
 	"github.com/gagliardetto/solana-go"
+	"github.com/gagliardetto/solana-go/rpc"
 )
 
 const ChainName = "mainnet"
@@ -243,4 +246,111 @@ func getPriceFeedPDA() solana.PublicKey {
 func getDvnConfigPDA() solana.PublicKey {
 	pda, _, _ := solana.FindProgramAddress([][]byte{DVN_CONFIG_SEED}, DVN_PROGRAM_ID)
 	return pda
+}
+
+// dvnWorker is one DVN's (program, config) pair as required by the LayerZero
+// ULN quote/send worker-account layout: per DVN the program passes
+// [dvn_program, dvn_config, price_feed_program, price_feed_config].
+type dvnWorker struct {
+	Program solana.PublicKey
+	Config  solana.PublicKey
+}
+
+// fetchSendDVNs reads the OApp's LIVE LayerZero ULN send config on-chain and
+// returns its ordered DVN (program, config) pairs. The ULN enforces
+// `worker_accounts == (required_dvns + optional_dvns) * 4` (else error 6019
+// InvalidAccountLength), so the DVN set must be read from the chain rather than
+// hardcoded — Orderly/LayerZero change it (mainnet currently runs 3 required
+// DVNs, not the 1 the reference script hardcodes). The custom send config
+// (seed [SendConfig, dst_eid_be, oapp]) wins when initialised; otherwise the
+// default (seed [SendConfig, dst_eid_be]) is used — mirroring the program's
+// get_send_config.
+func fetchSendDVNs(ctx context.Context, cl *rpc.Client, oappConfig solana.PublicKey, dstEid uint32) ([]dvnWorker, error) {
+	cfgPDA := getSendConfigPDA(oappConfig, dstEid)
+	info, err := cl.GetAccountInfo(ctx, cfgPDA)
+	if err != nil || info == nil || info.Value == nil || !info.Value.Owner.Equals(SEND_LIB_PROGRAM_ID) {
+		// custom send config uninitialised -> fall back to the default
+		cfgPDA = getDefaultSendConfigPDA(dstEid)
+		info, err = cl.GetAccountInfo(ctx, cfgPDA)
+		if err != nil {
+			return nil, fmt.Errorf("get send config: %w", err)
+		}
+	}
+	if info == nil || info.Value == nil {
+		return nil, fmt.Errorf("send config account not found")
+	}
+	data := info.Value.Data.GetBinary()
+
+	// SendConfig = 8 disc + bump(1) + UlnConfig{ confirmations(8),
+	// required_dvn_count(1)@17, optional_dvn_count(1)@18, threshold(1)@19,
+	// required_dvns: vec<pubkey>@20 (u32 len + n*32), optional_dvns: vec<pubkey> }.
+	if len(data) < 24 {
+		return nil, fmt.Errorf("send config too short: %d bytes", len(data))
+	}
+	off := 20
+	var configs []solana.PublicKey
+	readVec := func() error {
+		if off+4 > len(data) {
+			return fmt.Errorf("dvn vector truncated")
+		}
+		n := int(binary.LittleEndian.Uint32(data[off : off+4]))
+		off += 4
+		for i := 0; i < n; i++ {
+			if off+32 > len(data) {
+				return fmt.Errorf("dvn pubkey truncated")
+			}
+			configs = append(configs, solana.PublicKeyFromBytes(data[off:off+32]))
+			off += 32
+		}
+		return nil
+	}
+	if err := readVec(); err != nil { // required_dvns
+		return nil, err
+	}
+	if err := readVec(); err != nil { // optional_dvns
+		return nil, err
+	}
+	if len(configs) == 0 {
+		return nil, fmt.Errorf("send config lists zero DVNs")
+	}
+
+	// The DVN program is the owner of its config account (the ULN asserts
+	// dvn_program.key() == dvn_config.owner).
+	infos, err := cl.GetMultipleAccounts(ctx, configs...)
+	if err != nil {
+		return nil, fmt.Errorf("get dvn config owners: %w", err)
+	}
+	if infos == nil || len(infos.Value) != len(configs) {
+		return nil, fmt.Errorf("dvn config owner lookup returned %d of %d", len(infos.Value), len(configs))
+	}
+	workers := make([]dvnWorker, len(configs))
+	for i, cfg := range configs {
+		if infos.Value[i] == nil {
+			return nil, fmt.Errorf("dvn config %s not found on-chain", cfg)
+		}
+		workers[i] = dvnWorker{Program: infos.Value[i].Owner, Config: cfg}
+	}
+	return workers, nil
+}
+
+// appendDVNWorkerAccounts appends, for each DVN, the 4-account chunk the ULN
+// expects: [dvn_program, dvn_config, price_feed_program, price_feed_config].
+// All DVNs share the LayerZero price feed program + PDA (same as the executor).
+// On the send() path dvn_config must be writable (it receives the DVN fee); on
+// the read-only quote() path it stays read-only.
+func appendDVNWorkerAccounts(metas solana.AccountMetaSlice, dvns []dvnWorker, writableConfig bool) solana.AccountMetaSlice {
+	priceFeedPDA := getPriceFeedPDA()
+	for _, d := range dvns {
+		cfg := solana.Meta(d.Config)
+		if writableConfig {
+			cfg = cfg.WRITE()
+		}
+		metas = append(metas,
+			solana.Meta(d.Program),
+			cfg,
+			solana.Meta(PRICE_FEED_PROGRAM_ID),
+			solana.Meta(priceFeedPDA),
+		)
+	}
+	return metas
 }

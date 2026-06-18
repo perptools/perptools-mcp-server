@@ -23,6 +23,14 @@ var oappQuoteDiscriminator = func() [8]byte {
 	return d
 }()
 
+// lastLogs returns the final n simulation log lines joined for error context.
+func lastLogs(logs []string, n int) string {
+	if len(logs) > n {
+		logs = logs[len(logs)-n:]
+	}
+	return strings.Join(logs, " | ")
+}
+
 // GetDepositQuoteFee simulates an oappQuote call on the Orderly vault program
 // to get the LayerZero native fee required for a cross-chain deposit.
 func GetDepositQuoteFee(
@@ -60,7 +68,14 @@ func GetDepositQuoteFee(
 	defaultSendConfigPDA := getDefaultSendConfigPDA(dstEID)
 	executorConfigPDA := getExecutorConfigPDA()
 	priceFeedPDA := getPriceFeedPDA()
-	dvnConfigPDA := getDvnConfigPDA()
+
+	// DVN worker accounts are read live: the OApp's ULN send config decides how
+	// many DVNs participate (currently 3 on mainnet), and a hardcoded count
+	// triggers ULN error 6019 (InvalidAccountLength).
+	dvns, err := fetchSendDVNs(ctx, rpcClient, oappConfigPDA, dstEID)
+	if err != nil {
+		return 0, fmt.Errorf("resolve send DVNs: %w", err)
+	}
 
 	buf := new(bytes.Buffer)
 	enc := bin.NewBorshEncoder(buf)
@@ -101,11 +116,9 @@ func GetDepositQuoteFee(
 		solana.Meta(executorConfigPDA),
 		solana.Meta(PRICE_FEED_PROGRAM_ID),
 		solana.Meta(priceFeedPDA),
-		solana.Meta(DVN_PROGRAM_ID),
-		solana.Meta(dvnConfigPDA),
-		solana.Meta(PRICE_FEED_PROGRAM_ID),
-		solana.Meta(priceFeedPDA),
 	}
+	// per-DVN worker chunks, scaled to the live ULN config (read-only for quote)
+	remainingAccounts = appendDVNWorkerAccounts(remainingAccounts, dvns, false)
 
 	ix := solana.NewInstruction(
 		vaultProgram,
@@ -118,11 +131,24 @@ func GetDepositQuoteFee(
 		return 0, fmt.Errorf("get blockhash: %w", err)
 	}
 
+	// Raise the compute-unit limit: quoting fans out a CPI into the executor and
+	// every DVN (3 on mainnet) plus their price-feed lookups, which blows past the
+	// 200k default and otherwise fails as ProgramFailedToComplete.
+	// ComputeBudget SetComputeUnitLimit(1_400_000): opcode 0x02 + u32 LE units.
+	cuLimitIx := solana.NewInstruction(
+		solana.ComputeBudget,
+		solana.AccountMetaSlice{},
+		[]byte{0x02, 0xC0, 0x5C, 0x15, 0x00},
+	)
+
+	// No address-lookup-table here: the canonical Orderly quote (scripts/quote_oapp.ts
+	// `oappQuote(...).view()`) builds a plain legacy transaction. The accounts fit
+	// without an ALT, and pinning to a hardcoded ALT snapshot risks resolving stale
+	// pubkeys on-chain — which surfaces as ULN error 6019 (InvalidAccountLength).
 	tx, err := solana.NewTransaction(
-		[]solana.Instruction{ix},
+		[]solana.Instruction{cuLimitIx, ix},
 		recent.Value.Blockhash,
 		solana.TransactionPayer(userPublicKey),
-		solana.TransactionAddressTables(LOOKUP_TABLE_ADDRESS[ChainName]),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("build quote tx: %w", err)
@@ -134,7 +160,7 @@ func GetDepositQuoteFee(
 	}
 
 	if simResult.Value.Err != nil {
-		return 0, fmt.Errorf("simulation error: %v", simResult.Value.Err)
+		return 0, fmt.Errorf("simulation error: %v; logs: %s", simResult.Value.Err, lastLogs(simResult.Value.Logs, 6))
 	}
 
 	returnPrefix := fmt.Sprintf("Program return: %s ", vaultProgram.String())

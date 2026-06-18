@@ -152,6 +152,18 @@ type LeaderboardEntry struct {
 	Points    decimal.Decimal `json:"points"`
 }
 
+// LeaderboardStanding is the user-centric standing the /v1/leaderboard endpoint
+// now returns (the backend changed it from a paginated list of entries to the
+// caller's own rank/tier/points summary).
+type LeaderboardStanding struct {
+	UserPoints       string  `json:"user_points"`
+	UserRank         int64   `json:"user_rank"`
+	UserPreviousRank int64   `json:"user_previous_rank"`
+	CurrentTier      string  `json:"current_tier"`
+	NextTier         string  `json:"next_tier"`
+	ProgressBar      float64 `json:"progress_bar"`
+}
+
 type FeeTier struct {
 	Tier        int32           `json:"tier"`
 	MakerFee    decimal.Decimal `json:"maker_fee"`

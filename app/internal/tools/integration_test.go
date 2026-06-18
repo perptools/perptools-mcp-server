@@ -77,6 +77,9 @@ func setupAndAuth(t *testing.T) *testEnv {
 	for _, td := range tools.RegisterAIWithdrawalTools(svc) {
 		toolMap[td.Tool.Name] = td.Handler
 	}
+	for _, td := range tools.RegisterAgentChatTools(svc) {
+		toolMap[td.Tool.Name] = td.Handler
+	}
 
 	ctx := context.Background()
 	env := &testEnv{

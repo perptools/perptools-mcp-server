@@ -33,7 +33,7 @@ type Client interface {
 	GetUserPoints(ctx context.Context, publicKey string) (*UserPoints, error)
 	GetUserPointsHistory(ctx context.Context, publicKey string) ([]UserPointsHistoryRow, error)
 	GetUserMultipliers(ctx context.Context, publicKey string) (*Multipliers, error)
-	GetLeaderboard(ctx context.Context, publicKey string, limit, offset int32) ([]LeaderboardEntry, error)
+	GetLeaderboard(ctx context.Context, publicKey string) (*LeaderboardStanding, error)
 	GetFeeTier(ctx context.Context, publicKey string) (*FeeTier, error)
 
 	GetAvailableAchievements(ctx context.Context, publicKey string) ([]Achievement, error)
@@ -366,20 +366,16 @@ func (c *client) GetUserMultipliers(ctx context.Context, publicKey string) (*Mul
 	return &out, nil
 }
 
-func (c *client) GetLeaderboard(ctx context.Context, publicKey string, limit, offset int32) ([]LeaderboardEntry, error) {
-	var out []LeaderboardEntry
-	req := c.authedHTTP.R().SetContext(ctx).SetQueryParam("public_key", publicKey)
-	if limit > 0 {
-		req.SetQueryParam("limit", fmt.Sprintf("%d", limit))
-	}
-	if offset > 0 {
-		req.SetQueryParam("offset", fmt.Sprintf("%d", offset))
-	}
-	r, err := req.SetResult(&out).Get("/v1/leaderboard")
+func (c *client) GetLeaderboard(ctx context.Context, publicKey string) (*LeaderboardStanding, error) {
+	var out LeaderboardStanding
+	r, err := c.authedHTTP.R().SetContext(ctx).
+		SetQueryParam("public_key", publicKey).
+		SetResult(&out).
+		Get("/v1/leaderboard")
 	if e := checkErr(r, err, "get leaderboard"); e != nil {
 		return nil, e
 	}
-	return out, nil
+	return &out, nil
 }
 
 func (c *client) GetFeeTier(ctx context.Context, publicKey string) (*FeeTier, error) {

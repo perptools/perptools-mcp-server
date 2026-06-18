@@ -2,9 +2,14 @@ package service
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/gagliardetto/solana-go"
+	"github.com/gagliardetto/solana-go/rpc"
 
 	"mcp-server/app/internal/clients/orderly"
 	"mcp-server/app/internal/clients/perptools"
@@ -129,11 +134,11 @@ func (s *Service) GetUserPoints(ctx context.Context, publicKey string) (*perptoo
 	return s.perptools.GetUserPoints(ctx, publicKey)
 }
 
-func (s *Service) GetLeaderboard(ctx context.Context, publicKey string, limit, offset int32) ([]perptools.LeaderboardEntry, error) {
+func (s *Service) GetLeaderboard(ctx context.Context, publicKey string) (*perptools.LeaderboardStanding, error) {
 	if err := s.requireAuth(); err != nil {
 		return nil, err
 	}
-	return s.perptools.GetLeaderboard(ctx, publicKey, limit, offset)
+	return s.perptools.GetLeaderboard(ctx, publicKey)
 }
 
 // --- AI Agents (Envy-backed, via the AI proxy) ---
@@ -228,6 +233,194 @@ func (s *Service) CompleteMainDeposit(ctx context.Context, signedTransaction str
 		return "", err
 	}
 	return sig.String(), nil
+}
+
+// --- Orderly trading-vault deposit ---
+//
+// This is a SEPARATE money path from the AI-agent Main Account above. The
+// Orderly vault is the collateral the user trades with directly (create_order,
+// set_position_tp_sl, ...). Funding it is an on-chain LayerZero deposit into the
+// Orderly Solana vault program — distinct from the plain SPL transfer that tops
+// up the Main Account.
+
+// DepositResult is an unsigned Orderly-vault deposit transaction, ready for the
+// user's wallet to sign and then broadcast via CompleteOrderlyDeposit.
+type DepositResult struct {
+	TransactionBase64 string `json:"transaction_base64"`
+	WalletAddress     string `json:"wallet_address"`
+	Symbol            string `json:"symbol"`
+	Amount            uint64 `json:"amount"`
+	NativeFee         uint64 `json:"native_fee"`
+}
+
+// PrepareOrderlyDeposit builds an unsigned Solana transaction that deposits
+// `amount` (in token base units) of `symbol` into the user's ORDERLY TRADING
+// vault via LayerZero. The cross-chain messaging fee is quoted on-chain
+// (oappQuote simulation) and folded into the transaction. The wallet signs the
+// returned base64 and broadcasts it with CompleteOrderlyDeposit.
+func (s *Service) PrepareOrderlyDeposit(ctx context.Context, walletAddress, symbol string, amount uint64) (*DepositResult, error) {
+	if s.cfg.SolanaRPCURL == "" {
+		return nil, fmt.Errorf("solana RPC not configured — set SOLANA_RPC_URL")
+	}
+	rpcClient := s.solfund.RPC()
+
+	userKey, err := solana.PublicKeyFromBase58(walletAddress)
+	if err != nil {
+		return nil, fmt.Errorf("invalid wallet address: %w", err)
+	}
+
+	nativeFee, err := orderly.GetDepositQuoteFee(ctx, rpcClient, s.cfg.BrokerID, symbol, userKey, amount)
+	if err != nil {
+		return nil, fmt.Errorf("get deposit quote fee: %w", err)
+	}
+
+	recent, err := rpcClient.GetLatestBlockhash(ctx, rpc.CommitmentFinalized)
+	if err != nil {
+		return nil, fmt.Errorf("get blockhash: %w", err)
+	}
+
+	tx, err := orderly.Deposit(
+		ctx,
+		rpcClient,
+		s.cfg.BrokerID,
+		symbol,
+		userKey,
+		amount,
+		orderly.OAppSendParams{NativeFee: nativeFee, LzTokenFee: 0},
+		recent.Value.Blockhash,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("build deposit tx: %w", err)
+	}
+
+	txBase64, err := tx.ToBase64()
+	if err != nil {
+		return nil, fmt.Errorf("serialize tx: %w", err)
+	}
+
+	return &DepositResult{
+		TransactionBase64: txBase64,
+		WalletAddress:     walletAddress,
+		Symbol:            symbol,
+		Amount:            amount,
+		NativeFee:         nativeFee,
+	}, nil
+}
+
+// CompleteOrderlyDeposit broadcasts the signed Orderly-vault deposit transaction
+// (the base64 the wallet signed from PrepareOrderlyDeposit) to Solana and
+// returns the transaction signature. Mirrors CompleteMainDeposit, but funds the
+// trading vault rather than the Main Account; no auth is required because the
+// wallet's own signature already authorises the transfer.
+func (s *Service) CompleteOrderlyDeposit(ctx context.Context, signedTransaction string) (string, error) {
+	sig, err := s.solfund.SubmitBase64(ctx, signedTransaction)
+	if err != nil {
+		return "", err
+	}
+	return sig.String(), nil
+}
+
+// --- Orderly trading-vault withdrawal ---
+//
+// Withdrawing from the Orderly trading vault is a signed Orderly-API request,
+// not an on-chain LayerZero message. PrepareOrderlyWithdraw fetches the withdraw
+// nonce, builds the canonical sign message + a Solana memo transaction for the
+// wallet to sign; SubmitOrderlyWithdraw posts the signature to Orderly. Requires
+// the orderly key (prepare_orderly_key + complete_orderly_key).
+
+// WithdrawResult is the prepared Orderly withdrawal: the API message to echo
+// back to submit_orderly_withdraw, plus the Solana memo tx for the wallet to sign.
+type WithdrawResult struct {
+	Message           orderly.WithdrawRequestMessage `json:"message"`
+	TransactionBase64 string                         `json:"transaction_base64"`
+	WalletAddress     string                         `json:"wallet_address"`
+	Token             string                         `json:"token"`
+}
+
+// PrepareOrderlyWithdraw builds the sign message + Solana memo transaction for a
+// withdrawal from the user's Orderly trading vault to their wallet. The wallet
+// signs the returned transaction_base64; pass the signature plus the echoed
+// message to SubmitOrderlyWithdraw.
+func (s *Service) PrepareOrderlyWithdraw(ctx context.Context, walletAddress, token string, amount uint64) (*WithdrawResult, error) {
+	if s.orderlyPrivate == nil {
+		return nil, fmt.Errorf("orderly key not set — call prepare_orderly_key, then complete_orderly_key first")
+	}
+
+	userKey, err := solana.PublicKeyFromBase58(walletAddress)
+	if err != nil {
+		return nil, fmt.Errorf("invalid wallet address: %w", err)
+	}
+
+	nonceResp, err := s.orderlyPrivate.GetWithdrawNonce(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get withdraw nonce: %w", err)
+	}
+	withdrawNonce := nonceResp.Data.WithdrawNonce
+
+	// Orderly API expects timestamp in UNIX milliseconds
+	timestamp := uint64(time.Now().UTC().UnixMilli())
+
+	withdrawMsg := orderly.WithdrawMessage{
+		BrokerID:      s.cfg.BrokerID,
+		ChainID:       900900900,
+		Receiver:      walletAddress,
+		Token:         token,
+		Amount:        amount,
+		WithdrawNonce: withdrawNonce,
+		Timestamp:     timestamp,
+		ChainType:     "SOL",
+	}
+
+	signMessage, err := orderly.CreateWithdrawMessage(withdrawMsg)
+	if err != nil {
+		return nil, fmt.Errorf("create withdraw message: %w", err)
+	}
+
+	// Empty blockhash — wallet fills in recent blockhash when user signs
+	tx, err := orderly.PackMessageForSolana(userKey, signMessage, solana.Hash{})
+	if err != nil {
+		return nil, fmt.Errorf("pack message for solana: %w", err)
+	}
+
+	txBytes, err := tx.MarshalBinary()
+	if err != nil {
+		return nil, fmt.Errorf("serialize tx: %w", err)
+	}
+
+	// API message (all string fields per Orderly docs)
+	apiMsg := orderly.WithdrawRequestMessage{
+		BrokerID:      s.cfg.BrokerID,
+		ChainID:       900900900,
+		Receiver:      walletAddress,
+		Token:         token,
+		Amount:        strconv.FormatUint(amount, 10),
+		WithdrawNonce: strconv.FormatUint(withdrawNonce, 10),
+		Timestamp:     strconv.FormatUint(timestamp, 10),
+		ChainType:     "SOL",
+	}
+
+	return &WithdrawResult{
+		Message:           apiMsg,
+		TransactionBase64: base64.StdEncoding.EncodeToString(txBytes),
+		WalletAddress:     walletAddress,
+		Token:             token,
+	}, nil
+}
+
+// SubmitOrderlyWithdraw posts the signed withdrawal request to the Orderly API.
+func (s *Service) SubmitOrderlyWithdraw(ctx context.Context, signature string, msg orderly.WithdrawRequestMessage) (*orderly.CreateWithdrawResponse, error) {
+	if s.orderlyPrivate == nil {
+		return nil, fmt.Errorf("orderly key not set — call prepare_orderly_key, then complete_orderly_key first")
+	}
+
+	req := orderly.CreateWithdrawRequest{
+		Signature:         signature,
+		UserAddress:       msg.Receiver,
+		VerifyingContract: orderly.WithdrawVerifyingContract,
+		Message:           msg,
+	}
+
+	return s.orderlyPrivate.CreateWithdrawRequest(ctx, req)
 }
 
 // Balances is a snapshot an agent uses to decide whether (and how much) to top

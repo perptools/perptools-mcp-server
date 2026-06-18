@@ -32,6 +32,12 @@ func New(rpcURL string) *Client {
 	return &Client{rpc: rpc.New(rpcURL)}
 }
 
+// RPC exposes the underlying Solana RPC client for callers that build their own
+// transactions (e.g. the Orderly vault deposit, which needs an oappQuote
+// simulation and a recent blockhash). Reuses the same connection as the USDC
+// funding flow so there is a single RPC endpoint to configure.
+func (c *Client) RPC() *rpc.Client { return c.rpc }
+
 // ToRaw converts a human USDC amount (e.g. 1.5) to base units (1_500_000).
 func ToRaw(amount float64) uint64 {
 	return uint64(amount*1e6 + 0.5)

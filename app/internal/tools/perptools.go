@@ -41,10 +41,8 @@ func RegisterPerptoolsTools(svc *service.Service) []ToolDef {
 		},
 		{
 			Tool: mcp.NewTool("get_leaderboard",
-				mcp.WithDescription("Get points leaderboard. Requires authentication."),
+				mcp.WithDescription("Get the user's points-leaderboard standing: their points, rank, previous rank, current/next tier, and progress toward the next tier. Requires authentication."),
 				mcp.WithString("public_key", mcp.Required(), mcp.Description("User's Solana public key (base58)")),
-				mcp.WithNumber("limit", mcp.Description("Max results (default 10)")),
-				mcp.WithNumber("offset", mcp.Description("Offset for pagination (default 0)")),
 			),
 			Handler: getLeaderboard(svc),
 		},
@@ -102,10 +100,8 @@ func getLeaderboard(svc *service.Service) server.ToolHandlerFunc {
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		limit := int32(optNumber(req, "limit", 10))
-		offset := int32(optNumber(req, "offset", 0))
 
-		resp, err := svc.GetLeaderboard(ctx, pk, limit, offset)
+		resp, err := svc.GetLeaderboard(ctx, pk)
 		if err != nil {
 			return mcp.NewToolResultError(formatAuthError("get leaderboard", err)), nil
 		}

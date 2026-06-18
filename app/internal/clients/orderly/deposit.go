@@ -2,6 +2,7 @@ package orderly
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"strings"
 
@@ -9,6 +10,7 @@ import (
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 	computebudget "github.com/gagliardetto/solana-go/programs/compute-budget"
+	"github.com/gagliardetto/solana-go/rpc"
 )
 
 var (
@@ -46,6 +48,8 @@ func (p OAppSendParams) MarshalWithEncoder(enc *bin.Encoder) error {
 }
 
 func Deposit(
+	ctx context.Context,
+	rpcClient *rpc.Client,
 	brokerID, symbol string,
 	userPublicKey solana.PublicKey,
 	amount uint64,
@@ -104,7 +108,14 @@ func Deposit(
 	ulnEventAuthorityPDA := getUlnEventAuthorityPDA()
 	executorConfigPDA := getExecutorConfigPDA()
 	priceFeedPDA := getPriceFeedPDA()
-	dvnConfigPDA := getDvnConfigPDA()
+
+	// DVN worker accounts are read live from the OApp's ULN send config (3 DVNs on
+	// mainnet, not the 1 the reference script hardcodes) — a wrong count is ULN
+	// error 6019 (InvalidAccountLength). Must match what GetDepositQuoteFee priced.
+	dvns, err := fetchSendDVNs(ctx, rpcClient, oappConfigPDA, dstEID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve send DVNs: %w", err)
+	}
 
 	buf := new(bytes.Buffer)
 	enc := bin.NewBorshEncoder(buf)
@@ -170,11 +181,9 @@ func Deposit(
 		solana.Meta(executorConfigPDA).WRITE(),
 		solana.Meta(PRICE_FEED_PROGRAM_ID),
 		solana.Meta(priceFeedPDA),
-		solana.Meta(DVN_PROGRAM_ID),
-		solana.Meta(dvnConfigPDA).WRITE(),
-		solana.Meta(PRICE_FEED_PROGRAM_ID),
-		solana.Meta(priceFeedPDA),
 	}
+	// per-DVN worker chunks, scaled to the live ULN config (writable config: send pays the DVN fee)
+	remainingAccounts = appendDVNWorkerAccounts(remainingAccounts, dvns, true)
 
 	if err := enc.Encode(VaultDepositParams{
 		AccountID:   accountID,
