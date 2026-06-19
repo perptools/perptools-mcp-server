@@ -298,15 +298,23 @@ func (c *privateClient) PlaceAlgoOrder(ctx context.Context, req PlaceAlgoOrderRe
 }
 
 func (c *privateClient) CancelAlgoOrder(ctx context.Context, symbol string, algoOrderID int) error {
+	var out struct {
+		Success bool   `json:"success"`
+		Message string `json:"message,omitempty"`
+	}
 	r, err := c.http.R().SetContext(ctx).
 		SetQueryParam("symbol", symbol).
-		SetQueryParam("algo_order_id", strconv.Itoa(algoOrderID)).
+		SetQueryParam("order_id", strconv.Itoa(algoOrderID)).
+		SetResult(&out).
 		Delete("/v1/algo/order")
 	if err != nil {
 		return fmt.Errorf("cancel algo order: %w", err)
 	}
 	if r.IsError() {
 		return fmt.Errorf("cancel algo order: %s %s", r.Status(), r.String())
+	}
+	if !out.Success {
+		return fmt.Errorf("cancel algo order: %s", out.Message)
 	}
 	return nil
 }
