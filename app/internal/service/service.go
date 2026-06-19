@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -179,6 +181,84 @@ func (s *Service) DeleteAgent(ctx context.Context, walletAddress, agentID string
 		WalletAddress: walletAddress,
 		BotID:         agentID,
 	})
+}
+
+// GenerateAgentAvatar generates an avatar on our S3 bucket and returns its URL,
+// for use as create_agent's avatar_url. This is the standard way to obtain a
+// valid avatar — agent avatars must live on our S3 bucket.
+func (s *Service) GenerateAgentAvatar(ctx context.Context, wallet string) (*perptools.AvatarResponse, error) {
+	if err := s.requireAuth(); err != nil {
+		return nil, err
+	}
+	return s.perptools.GenerateAgentAvatar(ctx, wallet)
+}
+
+// AvatarUploadEligibility reports whether the user may upload a CUSTOM avatar
+// image (role KOL/VERIFIED). Everyone else must use GenerateAgentAvatar.
+func (s *Service) AvatarUploadEligibility(ctx context.Context, wallet string) (*perptools.AvatarEligibilityResponse, error) {
+	if err := s.requireAuth(); err != nil {
+		return nil, err
+	}
+	return s.perptools.GetAvatarUploadEligibility(ctx, wallet)
+}
+
+const maxAvatarBytes = 5 << 20 // 5 MiB — matches the backend's MaxAvatarBytes
+
+var avatarExtByType = map[string]string{
+	"image/png":  ".png",
+	"image/jpeg": ".jpg",
+	"image/webp": ".webp",
+	"image/gif":  ".gif",
+}
+
+// UploadCustomAvatar fetches the image at imageURL and uploads it as the user's
+// CUSTOM agent avatar to our S3 bucket. WHITELIST ONLY: the backend rejects
+// callers whose role is not KOL/VERIFIED (403). The returned URL is the S3 URL
+// to pass as create_agent's avatar_url.
+func (s *Service) UploadCustomAvatar(ctx context.Context, wallet, imageURL string) (*perptools.UploadAvatarResponse, error) {
+	if err := s.requireAuth(); err != nil {
+		return nil, err
+	}
+	data, fileName, err := fetchAvatarImage(ctx, imageURL)
+	if err != nil {
+		return nil, err
+	}
+	return s.perptools.UploadAgentAvatar(ctx, wallet, fileName, data)
+}
+
+// fetchAvatarImage downloads imageURL and validates it against the backend's
+// limits (≤5 MiB; png/jpeg/webp/gif) before we spend an upload round-trip.
+func fetchAvatarImage(ctx context.Context, imageURL string) ([]byte, string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, imageURL, nil)
+	if err != nil {
+		return nil, "", fmt.Errorf("invalid image_url: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("fetch image_url: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("fetch image_url: HTTP %d", resp.StatusCode)
+	}
+
+	ct := strings.ToLower(strings.TrimSpace(strings.SplitN(resp.Header.Get("Content-Type"), ";", 2)[0]))
+	ext, ok := avatarExtByType[ct]
+	if !ok {
+		return nil, "", fmt.Errorf("unsupported image type %q (allowed: png, jpeg, webp, gif)", ct)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxAvatarBytes+1))
+	if err != nil {
+		return nil, "", fmt.Errorf("read image: %w", err)
+	}
+	if len(data) == 0 {
+		return nil, "", fmt.Errorf("image is empty")
+	}
+	if len(data) > maxAvatarBytes {
+		return nil, "", fmt.Errorf("image exceeds the 5 MiB limit")
+	}
+	return data, "avatar" + ext, nil
 }
 
 // AgreementStatus returns whether the wallet has signed the risk-disclosure

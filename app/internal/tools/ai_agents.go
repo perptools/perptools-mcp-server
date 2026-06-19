@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/base64"
+	"strings"
 
 	"mcp-server/app/internal/clients/perptools"
 	"mcp-server/app/internal/service"
@@ -34,7 +35,11 @@ REQUIRED fields and their valid values:
 - symbol: a short ticker (e.g. MOMO), letters/digits.
 - description: a short trading thesis.
 - risk_level: EXACTLY one of "Low", "Medium", "High" (capitalized — other casings/values are rejected).
-- avatar_url: a public image URL for the agent (required by the backend; pass any valid image URL).
+- avatar_url: the agent's avatar image URL. It MUST be a URL on OUR S3 bucket — arbitrary external
+  image URLs are rejected. The standard way to get one is to call generate_agent_avatar FIRST and
+  pass its avatar_url here. Uploading your OWN custom image to our S3 bucket is restricted to
+  whitelisted users (role KOL or VERIFIED) and is done via the website, not this tool — check with
+  check_custom_avatar_eligibility. Everyone else must generate.
 
 Other prerequisites enforced server-side (may reject deployment):
 - The wallet must be premint-eligible or hold a KOL role.
@@ -50,7 +55,7 @@ AFTER create_agent succeeds, fund the agent:
 				mcp.WithString("symbol", mcp.Required(), mcp.Description("Short ticker/symbol for the agent (e.g. MOMO)")),
 				mcp.WithString("description", mcp.Required(), mcp.Description("Agent description / trading thesis")),
 				mcp.WithString("risk_level", mcp.Required(), mcp.Description(`Risk profile. Must be EXACTLY one of "Low", "Medium", or "High" (capitalized).`)),
-				mcp.WithString("avatar_url", mcp.Required(), mcp.Description("Public image URL for the agent's avatar (required by the backend).")),
+				mcp.WithString("avatar_url", mcp.Required(), mcp.Description("Agent avatar image URL. MUST be on our S3 bucket — get one from generate_agent_avatar (custom uploads are whitelist-only, KOL/VERIFIED). Arbitrary external URLs are rejected.")),
 				mcp.WithString("investment_horizon", mcp.Description("Investment horizon, e.g. short, medium, long (optional)")),
 				mcp.WithString("coins_to_trade", mcp.Description("Comma-separated coins the agent may trade (optional)")),
 				mcp.WithNumber("max_simultaneous_positions", mcp.Description("Cap on concurrent open positions (optional)")),
@@ -163,6 +168,104 @@ Only the agent's owner can delete it; wallet_address MUST be the authenticated u
 			),
 			Handler: deleteAgent(svc),
 		},
+		{
+			Tool: mcp.NewTool("generate_agent_avatar",
+				mcp.WithDescription(`Generate an avatar image for a new AI agent and return its URL. Requires authentication.
+
+Agent avatars MUST live on our S3 bucket — you cannot point create_agent at an arbitrary external
+image. This tool composes a random avatar, uploads it to our S3 bucket, and returns its public
+avatar_url, which you then pass straight to create_agent's avatar_url. This is the normal,
+everyone-can-use path for getting an avatar.
+
+Uploading your OWN custom image is a separate, restricted flow: only whitelisted users (role KOL or
+VERIFIED) may upload a custom avatar to our S3 bucket, and that is done on the website — not via
+this MCP server. Use check_custom_avatar_eligibility to see whether a wallet qualifies; if not,
+just generate one here.
+
+Returns {avatar_url}. Generation is quota-limited per user.`),
+				mcp.WithString("wallet_address", mcp.Required(), mcp.Description("Authenticated user's Solana wallet address (base58)")),
+			),
+			Handler: generateAgentAvatar(svc),
+		},
+		{
+			Tool: mcp.NewTool("check_custom_avatar_eligibility",
+				mcp.WithDescription(`Check whether the user may upload a CUSTOM agent avatar image to our S3 bucket. Requires authentication.
+
+Custom avatar uploads are restricted to whitelisted users (role KOL or VERIFIED); everyone else
+must use generate_agent_avatar. Returns {eligible}. When eligible=false, do not try to supply a
+custom image — generate one instead. (The actual custom upload happens on the website, not here.)`),
+				mcp.WithString("wallet_address", mcp.Required(), mcp.Description("Authenticated user's Solana wallet address (base58)")),
+			),
+			Handler: checkCustomAvatarEligibility(svc),
+		},
+		{
+			Tool: mcp.NewTool("upload_custom_agent_avatar",
+				mcp.WithDescription(`Upload a CUSTOM image as an agent avatar to our S3 bucket and return its URL. Requires authentication.
+
+WHITELIST ONLY: this works ONLY for whitelisted users whose role is KOL or VERIFIED. Everyone else
+gets ACCESS DENIED (role not allowed) — they must use generate_agent_avatar instead. Check first
+with check_custom_avatar_eligibility; if eligible=false, do NOT call this.
+
+The MCP server downloads the image at image_url and uploads it (≤ 5 MiB; PNG/JPEG/WebP/GIF only),
+then returns {avatar_url} (on our S3 bucket) to pass to create_agent's avatar_url.`),
+				mcp.WithString("wallet_address", mcp.Required(), mcp.Description("Authenticated user's Solana wallet address (base58). Must be whitelisted (role KOL/VERIFIED).")),
+				mcp.WithString("image_url", mcp.Required(), mcp.Description("Public URL of the image to upload (≤ 5 MiB; PNG, JPEG, WebP, or GIF).")),
+			),
+			Handler: uploadCustomAgentAvatar(svc),
+		},
+	}
+}
+
+func uploadCustomAgentAvatar(svc *service.Service) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		wallet, err := req.RequireString("wallet_address")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		imageURL, err := req.RequireString("image_url")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		resp, err := svc.UploadCustomAvatar(ctx, wallet, imageURL)
+		if err != nil {
+			low := strings.ToLower(err.Error())
+			if strings.Contains(low, "allowed to upload") || strings.Contains(low, "403") {
+				return mcp.NewToolResultError("ACCESS DENIED: custom avatar upload is whitelist-only (role KOL or VERIFIED). This wallet is not eligible — use generate_agent_avatar instead. (check_custom_avatar_eligibility confirms eligibility.)\n\n" + err.Error()), nil
+			}
+			return mcp.NewToolResultError(formatAuthError("upload custom agent avatar", err)), nil
+		}
+		return jsonResult(map[string]any{"avatar_url": resp.URL})
+	}
+}
+
+func generateAgentAvatar(svc *service.Service) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		wallet, err := req.RequireString("wallet_address")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		resp, err := svc.GenerateAgentAvatar(ctx, wallet)
+		if err != nil {
+			return mcp.NewToolResultError(formatAuthError("generate agent avatar", err)), nil
+		}
+		return jsonResult(map[string]any{"avatar_url": resp.FileURL})
+	}
+}
+
+func checkCustomAvatarEligibility(svc *service.Service) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		wallet, err := req.RequireString("wallet_address")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		resp, err := svc.AvatarUploadEligibility(ctx, wallet)
+		if err != nil {
+			return mcp.NewToolResultError(formatAuthError("check custom avatar eligibility", err)), nil
+		}
+		return jsonResult(map[string]any{
+			"eligible": resp.Eligible,
+			"note":     "Custom avatar upload requires role KOL or VERIFIED and is done on the website. If not eligible, use generate_agent_avatar.",
+		})
 	}
 }
 

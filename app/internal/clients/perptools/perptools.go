@@ -1,6 +1,7 @@
 package perptools
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
@@ -71,6 +72,15 @@ type Client interface {
 	// ArchiveAgent permanently deletes an agent the caller owns
 	// (path /api/v1/creator/agents/archive).
 	ArchiveAgent(ctx context.Context, publicKey string, req AgentArchiveRequest) (*AgentControlResponse, error)
+	// GenerateAgentAvatar composes a random avatar, uploads it to our S3 bucket
+	// and returns its public URL (path /v1/ai/avatar, quota-gated). Open to all.
+	GenerateAgentAvatar(ctx context.Context, publicKey string) (*AvatarResponse, error)
+	// GetAvatarUploadEligibility reports whether the user may upload a CUSTOM
+	// avatar image (role KOL/VERIFIED) — path /v1/ai/avatar/eligible.
+	GetAvatarUploadEligibility(ctx context.Context, publicKey string) (*AvatarEligibilityResponse, error)
+	// UploadAgentAvatar uploads a CUSTOM avatar image (multipart PUT
+	// /v1/ai/avatar). Role-gated to KOL/VERIFIED; everyone else gets 403.
+	UploadAgentAvatar(ctx context.Context, publicKey, fileName string, data []byte) (*UploadAvatarResponse, error)
 	// WithdrawFromMaster moves USDC from the Main Account to the registered
 	// on-chain wallet (path /api/v1/users/withdraw/solana). Synchronous —
 	// the on-chain transfer is done when it returns.
@@ -648,6 +658,73 @@ func (c *client) DeployAgent(ctx context.Context, publicKey string, req DeployAg
 	var out DeployAgentResponse
 	if err := c.aiProxy(ctx, publicKey, "/api/v1/deploy/agent", http.MethodPost, req, &out); err != nil {
 		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *client) GenerateAgentAvatar(ctx context.Context, publicKey string) (*AvatarResponse, error) {
+	var out AvatarResponse
+	r, err := c.authedHTTP.R().SetContext(ctx).
+		SetQueryParam("public_key", publicKey).
+		SetResult(&out).
+		Get("/v1/ai/avatar")
+	if e := checkErr(r, err, "generate avatar"); e != nil {
+		return nil, e
+	}
+	return &out, nil
+}
+
+func (c *client) GetAvatarUploadEligibility(ctx context.Context, publicKey string) (*AvatarEligibilityResponse, error) {
+	var out AvatarEligibilityResponse
+	r, err := c.authedHTTP.R().SetContext(ctx).
+		SetQueryParam("public_key", publicKey).
+		SetResult(&out).
+		Get("/v1/ai/avatar/eligible")
+	if e := checkErr(r, err, "check avatar upload eligibility"); e != nil {
+		return nil, e
+	}
+	return &out, nil
+}
+
+// orderlyMultipartSignMiddleware signs a multipart request the way the backend
+// verifies the single multipart route (PUT /v1/ai/avatar): same normalized
+// string as orderlySignMiddleware (ts+method+url+?query) but the body is
+// EXCLUDED (the boundary is unknowable at sign time, and the route is on the
+// backend's multipart allow-list) and Content-Type is left untouched so resty's
+// multipart writer can set its own boundary header.
+func orderlyMultipartSignMiddleware(accountID, publicKey string, privateKey ed25519.PrivateKey) resty.RequestMiddleware {
+	return func(_ *resty.Client, r *resty.Request) error {
+		ts := strconv.FormatInt(time.Now().UTC().UnixMilli(), 10)
+		normalized := ts + r.Method + r.URL
+		if len(r.QueryParam) != 0 {
+			normalized += "?" + r.QueryParam.Encode()
+		}
+		sig := ed25519.Sign(privateKey, []byte(normalized))
+		r.SetHeader("orderly-account-id", accountID)
+		r.SetHeader("orderly-key", "ed25519:"+publicKey)
+		r.SetHeader("orderly-timestamp", ts)
+		r.SetHeader("orderly-signature", base64.RawURLEncoding.EncodeToString(sig))
+		return nil
+	}
+}
+
+func (c *client) UploadAgentAvatar(ctx context.Context, publicKey, fileName string, data []byte) (*UploadAvatarResponse, error) {
+	if c.orderlyPrivateKey == nil {
+		return nil, fmt.Errorf("custom avatar upload requires authentication (orderly key) — complete the auth flow first")
+	}
+	// A dedicated client: the shared authedHTTP middleware forces
+	// Content-Type: application/json and signs the body, both wrong for multipart.
+	up := resty.New().SetBaseURL(c.baseURL)
+	up.OnBeforeRequest(orderlyMultipartSignMiddleware(c.accountID, c.orderlyPublicKey, c.orderlyPrivateKey))
+
+	var out UploadAvatarResponse
+	r, err := up.R().SetContext(ctx).
+		SetQueryParam("public_key", publicKey).
+		SetFileReader("file", fileName, bytes.NewReader(data)).
+		SetResult(&out).
+		Put("/v1/ai/avatar")
+	if e := checkErr(r, err, "upload custom avatar"); e != nil {
+		return nil, e
 	}
 	return &out, nil
 }

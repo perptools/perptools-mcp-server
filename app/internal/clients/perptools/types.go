@@ -723,6 +723,26 @@ type AgentControlResponse struct {
 	Error   string `json:"error,omitempty"`
 }
 
+// AvatarResponse is the GET /v1/ai/avatar result — the public URL (on our S3
+// bucket) of a freshly generated agent avatar, ready to pass as create_agent's
+// avatar_url.
+type AvatarResponse struct {
+	FileURL string `json:"file_url"`
+}
+
+// AvatarEligibilityResponse is the GET /v1/ai/avatar/eligible result — whether
+// the user's role (KOL/VERIFIED) permits uploading a CUSTOM avatar image to S3
+// (the generate path is open to everyone; custom upload is role-gated).
+type AvatarEligibilityResponse struct {
+	Eligible bool `json:"eligible"`
+}
+
+// UploadAvatarResponse is the PUT /v1/ai/avatar result — the public S3 URL of a
+// user-uploaded CUSTOM avatar (role KOL/VERIFIED only).
+type UploadAvatarResponse struct {
+	URL string `json:"url"`
+}
+
 // MasterWithdrawRequest is the Envy /api/v1/users/withdraw/solana body.
 // Amount is in USDC. The destination is ALWAYS the registered wallet —
 // there is no destination parameter.
